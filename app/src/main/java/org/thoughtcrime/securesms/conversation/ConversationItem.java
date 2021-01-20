@@ -63,6 +63,7 @@ import org.thoughtcrime.securesms.ConfirmIdentityDialog;
 import org.thoughtcrime.securesms.MediaPreviewActivity;
 import org.thoughtcrime.securesms.R;
 import org.thoughtcrime.securesms.attachments.DatabaseAttachment;
+import org.thoughtcrime.securesms.color.MaterialColor;
 import org.thoughtcrime.securesms.components.AlertView;
 import org.thoughtcrime.securesms.components.AudioView;
 import org.thoughtcrime.securesms.components.AvatarImageView;
@@ -421,7 +422,10 @@ public final class ConversationItem extends RelativeLayout implements BindableCo
       footer.setIconColor(ContextCompat.getColor(context, R.color.signal_icon_tint_secondary));
       footer.setOnlyShowSendingStatus(messageRecord.isRemoteDelete(), messageRecord);
     } else {
-      bodyBubble.getBackground().setColorFilter(messageRecord.getRecipient().getColor().toConversationColor(context), PorterDuff.Mode.MULTIPLY);
+      bodyBubble.getBackground().setColorFilter((TextSecurePreferences.getUseContactColor(context)
+              ? messageRecord.getRecipient().getColor().toConversationColor(context)
+              : ContextCompat.getColor(context, R.color.core_dark_green)),
+              PorterDuff.Mode.MULTIPLY);
       footer.setTextColor(ContextCompat.getColor(context, R.color.conversation_item_received_text_secondary_color));
       footer.setIconColor(ContextCompat.getColor(context, R.color.conversation_item_received_text_secondary_color));
       footer.setOnlyShowSendingStatus(false, messageRecord);
@@ -1134,8 +1138,11 @@ public final class ConversationItem extends RelativeLayout implements BindableCo
         groupSender.setTextColor(stickerAuthorColor);
         groupSenderProfileName.setTextColor(stickerAuthorColor);
       } else {
-        groupSender.setTextColor(ContextCompat.getColor(context, R.color.conversation_item_received_text_primary_color));
-        groupSenderProfileName.setTextColor(ContextCompat.getColor(context, R.color.conversation_item_received_text_primary_color));
+        int color = TextSecurePreferences.getUseContactColor(context)
+                ? ContextCompat.getColor(context, R.color.conversation_item_received_text_primary_color)
+                : messageRecord.getRecipient().getColor().toConversationColor(context);
+        groupSender.setTextColor(color);
+        groupSenderProfileName.setTextColor(color);
       }
     }
   }
@@ -1143,8 +1150,7 @@ public final class ConversationItem extends RelativeLayout implements BindableCo
   @SuppressWarnings("ConstantConditions")
   private void setAuthor(@NonNull MessageRecord current, @NonNull Optional<MessageRecord> previous, @NonNull Optional<MessageRecord> next, boolean isGroupThread) {
     if (isGroupThread && !current.isOutgoing()) {
-      contactPhotoHolder.setVisibility(VISIBLE);
-
+      contactPhotoHolder.setVisibility(TextSecurePreferences.getShowAvatar(getContext()) ? VISIBLE : GONE);
       if (!previous.isPresent() || previous.get().isUpdate() || !current.getRecipient().equals(previous.get().getRecipient()) ||
           !DateUtils.isSameDay(previous.get().getTimestamp(), current.getTimestamp()))
       {

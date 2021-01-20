@@ -57,6 +57,19 @@
                 android:summary="@string/preferences__pressing_the_enter_key_will_send_text_messages"
                 android:title="@string/preferences__pref_enter_sends_title"/>
 
+        <org.thoughtcrime.securesms.components.SwitchPreferenceCompat
+            android:defaultValue="false"
+            android:key="pref_show_avatar"
+            android:summary="@string/preferences__show_avatar"
+            android:title="@string/preferences__show_avatar_title"/>
+
+
+        <org.thoughtcrime.securesms.components.SwitchPreferenceCompat
+            android:defaultValue="true"
+            android:key="pref_use_contact_color"
+            android:summary="@string/preferences__use_contact_color"
+            android:title="@string/preferences__use_contact_color_title"/>
+
     </PreferenceCategory>
 
     <PreferenceCategory android:layout="@layout/preference_divider"/>
