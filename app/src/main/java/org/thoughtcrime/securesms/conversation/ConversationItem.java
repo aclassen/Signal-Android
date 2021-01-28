@@ -48,6 +48,7 @@ import android.widget.RelativeLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import androidx.annotation.ColorInt;
 import androidx.annotation.DimenRes;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
@@ -156,17 +157,17 @@ public final class ConversationItem extends RelativeLayout implements BindableCo
   private boolean             groupThread;
   private LiveRecipient       recipient;
   private GlideRequests       glideRequests;
-  private ValueAnimator pulseOutlinerAlphaAnimator;
+  private ValueAnimator       pulseOutlinerAlphaAnimator;
 
             protected ConversationItemBodyBubble bodyBubble;
             protected View                       reply;
+            protected View                       replyIcon;
   @Nullable protected ViewGroup                  contactPhotoHolder;
   @Nullable private   QuoteView                  quoteView;
             private   EmojiTextView              bodyText;
             private   ConversationItemFooter     footer;
             private   ConversationItemFooter     stickerFooter;
   @Nullable private   TextView                   groupSender;
-  @Nullable private   TextView                   groupSenderProfileName;
   @Nullable private   View                       groupSenderHolder;
             private   AvatarImageView            contactPhoto;
             private   AlertView                  alertView;
@@ -187,6 +188,7 @@ public final class ConversationItem extends RelativeLayout implements BindableCo
   private @Nullable EventListener                   eventListener;
 
   private int defaultBubbleColor;
+  private int defaultBubbleColorForWallpaper;
   private int measureCalls;
 
   private final PassthroughClickListener        passthroughClickListener    = new PassthroughClickListener();
@@ -224,7 +226,6 @@ public final class ConversationItem extends RelativeLayout implements BindableCo
     this.footer                  =            findViewById(R.id.conversation_item_footer);
     this.stickerFooter           =            findViewById(R.id.conversation_item_sticker_footer);
     this.groupSender             =            findViewById(R.id.group_message_sender);
-    this.groupSenderProfileName  =            findViewById(R.id.group_message_sender_profile);
     this.alertView               =            findViewById(R.id.indicators_parent);
     this.contactPhoto            =            findViewById(R.id.contact_photo);
     this.contactPhotoHolder      =            findViewById(R.id.contact_photo_container);
@@ -238,7 +239,8 @@ public final class ConversationItem extends RelativeLayout implements BindableCo
     this.revealableStub          = new Stub<>(findViewById(R.id.revealable_view_stub));
     this.groupSenderHolder       =            findViewById(R.id.group_sender_holder);
     this.quoteView               =            findViewById(R.id.quote_view);
-    this.reply                   =            findViewById(R.id.reply_icon);
+    this.reply                   =            findViewById(R.id.reply_icon_wrapper);
+    this.replyIcon               =            findViewById(R.id.reply_icon);
     this.reactionsView           =            findViewById(R.id.reactions_view);
 
     setOnClickListener(new ClickListener(null));
@@ -257,7 +259,8 @@ public final class ConversationItem extends RelativeLayout implements BindableCo
                    @NonNull Set<ConversationMessage> batchSelected,
                    @NonNull Recipient conversationRecipient,
                    @Nullable String searchQuery,
-                   boolean pulse)
+                   boolean pulse,
+                   boolean hasWallpaper)
   {
     if (this.recipient != null) this.recipient.removeForeverObserver(this);
     if (this.conversationRecipient != null) this.conversationRecipient.removeForeverObserver(this);
@@ -278,19 +281,19 @@ public final class ConversationItem extends RelativeLayout implements BindableCo
 
     setGutterSizes(messageRecord, groupThread);
     setMessageShape(messageRecord, previousMessageRecord, nextMessageRecord, groupThread);
-    setMediaAttributes(messageRecord, previousMessageRecord, nextMessageRecord, conversationRecipient, groupThread);
+    setMediaAttributes(messageRecord, previousMessageRecord, nextMessageRecord, conversationRecipient, groupThread, hasWallpaper);
     setBodyText(messageRecord, searchQuery);
-    setBubbleState(messageRecord);
+    setBubbleState(messageRecord, hasWallpaper);
     setInteractionState(conversationMessage, pulse);
-    setStatusIcons(messageRecord);
+    setStatusIcons(messageRecord, hasWallpaper);
     setContactPhoto(recipient.get());
     setGroupMessageStatus(messageRecord, recipient.get());
-    setGroupAuthorColor(messageRecord);
-    setAuthor(messageRecord, previousMessageRecord, nextMessageRecord, groupThread);
+    setGroupAuthorColor(messageRecord, hasWallpaper);
+    setAuthor(messageRecord, previousMessageRecord, nextMessageRecord, groupThread, hasWallpaper);
     setQuote(messageRecord, previousMessageRecord, nextMessageRecord, groupThread);
     setMessageSpacing(context, messageRecord, previousMessageRecord, nextMessageRecord, groupThread);
     setReactions(messageRecord);
-    setFooter(messageRecord, nextMessageRecord, locale, groupThread);
+    setFooter(messageRecord, nextMessageRecord, locale, groupThread, hasWallpaper);
   }
 
   @Override
@@ -345,12 +348,14 @@ public final class ConversationItem extends RelativeLayout implements BindableCo
       }
     }
 
-    ConversationItemFooter activeFooter   = getActiveFooter(messageRecord);
-    int                    availableWidth = getAvailableMessageBubbleWidth(footer);
+    if (!hasNoBubble(messageRecord)) {
+      ConversationItemFooter activeFooter   = getActiveFooter(messageRecord);
+      int                    availableWidth = getAvailableMessageBubbleWidth(footer);
 
-    if (activeFooter.getVisibility() != GONE && activeFooter.getMeasuredWidth() != availableWidth) {
-      activeFooter.getLayoutParams().width = availableWidth;
-      needsMeasure = true;
+      if (activeFooter.getVisibility() != GONE && activeFooter.getMeasuredWidth() != availableWidth) {
+        activeFooter.getLayoutParams().width = availableWidth;
+        needsMeasure = true;
+      }
     }
 
     if (needsMeasure) {
@@ -367,7 +372,7 @@ public final class ConversationItem extends RelativeLayout implements BindableCo
 
   @Override
   public void onRecipientChanged(@NonNull Recipient modified) {
-    setBubbleState(messageRecord);
+    setBubbleState(messageRecord, modified.hasWallpaper());
     if (recipient.getId().equals(modified.getId())) {
       setContactPhoto(modified);
       setGroupMessageStatus(messageRecord, modified);
@@ -390,7 +395,12 @@ public final class ConversationItem extends RelativeLayout implements BindableCo
   }
 
   private void initializeAttributes() {
-    defaultBubbleColor = ContextCompat.getColor(context, R.color.signal_background_secondary);
+    defaultBubbleColor             = ContextCompat.getColor(context, R.color.signal_background_secondary);
+    defaultBubbleColorForWallpaper = ContextCompat.getColor(context, R.color.conversation_item_wallpaper_bubble_color);
+  }
+
+  private @ColorInt int getDefaultBubbleColor(boolean hasWallpaper) {
+    return hasWallpaper ? defaultBubbleColorForWallpaper : defaultBubbleColor;
   }
 
   @Override
@@ -410,16 +420,20 @@ public final class ConversationItem extends RelativeLayout implements BindableCo
 
   /// MessageRecord Attribute Parsers
 
-  private void setBubbleState(MessageRecord messageRecord) {
+  private void setBubbleState(MessageRecord messageRecord, boolean hasWallpaper) {
     if (messageRecord.isOutgoing() && !messageRecord.isRemoteDelete()) {
-      bodyBubble.getBackground().setColorFilter(defaultBubbleColor, PorterDuff.Mode.MULTIPLY);
+      bodyBubble.getBackground().setColorFilter(getDefaultBubbleColor(hasWallpaper), PorterDuff.Mode.MULTIPLY);
       footer.setTextColor(ContextCompat.getColor(context, R.color.signal_text_secondary));
       footer.setIconColor(ContextCompat.getColor(context, R.color.signal_icon_tint_secondary));
       footer.setOnlyShowSendingStatus(false, messageRecord);
     } else if (messageRecord.isRemoteDelete() || (isViewOnceMessage(messageRecord) && ViewOnceUtil.isViewed((MmsMessageRecord) messageRecord))) {
-      bodyBubble.getBackground().setColorFilter(ContextCompat.getColor(context, R.color.signal_background_primary), PorterDuff.Mode.MULTIPLY);
+      if (hasWallpaper) {
+        bodyBubble.getBackground().setColorFilter(ContextCompat.getColor(context, R.color.wallpaper_bubble_color), PorterDuff.Mode.SRC_IN);
+      } else {
+        bodyBubble.getBackground().setColorFilter(ContextCompat.getColor(context, R.color.signal_background_primary), PorterDuff.Mode.MULTIPLY);
+        footer.setIconColor(ContextCompat.getColor(context, R.color.signal_icon_tint_secondary));
+      }
       footer.setTextColor(ContextCompat.getColor(context, R.color.signal_text_secondary));
-      footer.setIconColor(ContextCompat.getColor(context, R.color.signal_icon_tint_secondary));
       footer.setOnlyShowSendingStatus(messageRecord.isRemoteDelete(), messageRecord);
     } else {
       bodyBubble.getBackground().setColorFilter((TextSecurePreferences.getUseContactColor(context)
@@ -437,7 +451,7 @@ public final class ConversationItem extends RelativeLayout implements BindableCo
     pulseOutliner.setStrokeWidth(ViewUtil.dpToPx(4));
 
     outliners.clear();
-    if (shouldDrawBodyBubbleOutline(messageRecord)) {
+    if (shouldDrawBodyBubbleOutline(messageRecord, hasWallpaper)) {
       outliners.add(outliner);
     }
     outliners.add(pulseOutliner);
@@ -450,6 +464,12 @@ public final class ConversationItem extends RelativeLayout implements BindableCo
 
     if (audioViewStub.resolved()) {
       setAudioViewTint(messageRecord);
+    }
+
+    if (hasWallpaper) {
+      replyIcon.setBackgroundResource(R.drawable.wallpaper_message_decoration_background);
+    } else {
+      replyIcon.setBackground(null);
     }
   }
 
@@ -519,9 +539,13 @@ public final class ConversationItem extends RelativeLayout implements BindableCo
     pulseOutliner.setAlpha(0);
   }
 
-  private boolean shouldDrawBodyBubbleOutline(MessageRecord messageRecord) {
-    boolean isIncomingViewedOnce = !messageRecord.isOutgoing() && isViewOnceMessage(messageRecord) && ViewOnceUtil.isViewed((MmsMessageRecord) messageRecord);
-    return isIncomingViewedOnce || messageRecord.isRemoteDelete();
+  private boolean shouldDrawBodyBubbleOutline(MessageRecord messageRecord, boolean hasWallpaper) {
+    if (hasWallpaper) {
+      return false;
+    } else {
+      boolean isIncomingViewedOnce = !messageRecord.isOutgoing() && isViewOnceMessage(messageRecord) && ViewOnceUtil.isViewed((MmsMessageRecord) messageRecord);
+      return isIncomingViewedOnce || messageRecord.isRemoteDelete();
+    }
   }
 
   private boolean isCaptionlessMms(MessageRecord messageRecord) {
@@ -545,6 +569,10 @@ public final class ConversationItem extends RelativeLayout implements BindableCo
     return isCaptionlessMms(messageRecord)   &&
            hasThumbnail(messageRecord)       &&
            ((MmsMessageRecord)messageRecord).getSlideDeck().getThumbnailSlide().isBorderless();
+  }
+
+  private boolean hasNoBubble(MessageRecord messageRecord) {
+    return hasSticker(messageRecord) || isBorderless(messageRecord);
   }
 
   private boolean hasOnlyThumbnail(MessageRecord messageRecord) {
@@ -650,7 +678,8 @@ public final class ConversationItem extends RelativeLayout implements BindableCo
                                   @NonNull Optional<MessageRecord> previousRecord,
                                   @NonNull Optional<MessageRecord> nextRecord,
                                   @NonNull Recipient               conversationRecipient,
-                                           boolean                 isGroupThread)
+                                           boolean                 isGroupThread,
+                                           boolean                 hasWallpaper)
   {
     boolean showControls = !messageRecord.isFailed();
 
@@ -825,7 +854,7 @@ public final class ConversationItem extends RelativeLayout implements BindableCo
       mediaThumbnailStub.get().setOnLongClickListener(passthroughClickListener);
       mediaThumbnailStub.get().setOnClickListener(passthroughClickListener);
       mediaThumbnailStub.get().showShade(TextUtils.isEmpty(messageRecord.getDisplayBody(getContext())) && !hasExtraText(messageRecord));
-      mediaThumbnailStub.get().setConversationColor(messageRecord.isOutgoing() ? defaultBubbleColor
+      mediaThumbnailStub.get().setConversationColor(messageRecord.isOutgoing() ? getDefaultBubbleColor(hasWallpaper)
                                                                                : messageRecord.getRecipient().getColor().toConversationColor(context));
       mediaThumbnailStub.get().setBorderless(false);
 
@@ -986,7 +1015,7 @@ public final class ConversationItem extends RelativeLayout implements BindableCo
     return messageBody;
   }
 
-  private void setStatusIcons(MessageRecord messageRecord) {
+  private void setStatusIcons(MessageRecord messageRecord, boolean hasWallpaper) {
     bodyText.setCompoundDrawablesWithIntrinsicBounds(0, 0, messageRecord.isKeyExchange() ? R.drawable.ic_menu_login : 0, 0);
 
     if (messageRecord.isFailed()) {
@@ -995,6 +1024,12 @@ public final class ConversationItem extends RelativeLayout implements BindableCo
       alertView.setPendingApproval();
     } else {
       alertView.setNone();
+    }
+
+    if (hasWallpaper) {
+      alertView.setBackgroundResource(R.drawable.wallpaper_message_decoration_background);
+    } else {
+      alertView.setBackground(null);
     }
   }
 
@@ -1051,9 +1086,9 @@ public final class ConversationItem extends RelativeLayout implements BindableCo
 
   private void setGutterSizes(@NonNull MessageRecord current, boolean isGroupThread) {
     if (isGroupThread && current.isOutgoing()) {
-      ViewUtil.setLeftMargin(this, readDimen(R.dimen.conversation_group_left_gutter));
+      ViewUtil.setPaddingStart(this, readDimen(R.dimen.conversation_group_left_gutter));
     } else if (current.isOutgoing()) {
-      ViewUtil.setLeftMargin(this, readDimen(R.dimen.conversation_individual_left_gutter));
+      ViewUtil.setPaddingStart(this, readDimen(R.dimen.conversation_individual_left_gutter));
     }
   }
 
@@ -1078,7 +1113,7 @@ public final class ConversationItem extends RelativeLayout implements BindableCo
     });
   }
 
-  private void setFooter(@NonNull MessageRecord current, @NonNull Optional<MessageRecord> next, @NonNull Locale locale, boolean isGroupThread) {
+  private void setFooter(@NonNull MessageRecord current, @NonNull Optional<MessageRecord> next, @NonNull Locale locale, boolean isGroupThread, boolean hasWallpaper) {
     ViewUtil.updateLayoutParams(footer, LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT);
 
     footer.setVisibility(GONE);
@@ -1094,11 +1129,27 @@ public final class ConversationItem extends RelativeLayout implements BindableCo
       ConversationItemFooter activeFooter = getActiveFooter(current);
       activeFooter.setVisibility(VISIBLE);
       activeFooter.setMessageRecord(current, locale);
+
+      if (hasWallpaper && hasNoBubble((messageRecord))) {
+        if (messageRecord.isOutgoing()) {
+          activeFooter.enableBubbleBackground(R.drawable.wallpaper_bubble_background_tintable_11, getDefaultBubbleColor(hasWallpaper));
+        } else {
+          activeFooter.enableBubbleBackground(R.drawable.wallpaper_bubble_background_tintable_11,  messageRecord.getRecipient().getColor().toConversationColor(context));
+          activeFooter.setTextColor(ContextCompat.getColor(context, R.color.conversation_item_received_text_secondary_color));
+          activeFooter.setIconColor(ContextCompat.getColor(context, R.color.conversation_item_received_text_secondary_color));
+        }
+      } else if (hasNoBubble(messageRecord)){
+        activeFooter.disableBubbleBackground();
+        activeFooter.setTextColor(ContextCompat.getColor(context, R.color.signal_text_secondary));
+        activeFooter.setIconColor(ContextCompat.getColor(context, R.color.signal_icon_tint_secondary));
+      } else {
+        activeFooter.disableBubbleBackground();
+      }
     }
   }
 
   private ConversationItemFooter getActiveFooter(@NonNull MessageRecord messageRecord) {
-    if (hasSticker(messageRecord) || isBorderless(messageRecord)) {
+    if (hasNoBubble(messageRecord)) {
       return stickerFooter;
     } else if (hasSharedContact(messageRecord) && TextUtils.isEmpty(messageRecord.getDisplayBody(getContext()))) {
       return sharedContactStub.get().getFooter();
@@ -1122,21 +1173,19 @@ public final class ConversationItem extends RelativeLayout implements BindableCo
 
   @SuppressLint("SetTextI18n")
   private void setGroupMessageStatus(MessageRecord messageRecord, Recipient recipient) {
-    if (groupThread && !messageRecord.isOutgoing() && groupSender != null && groupSenderProfileName != null) {
+    if (groupThread && !messageRecord.isOutgoing() && groupSender != null) {
       groupSender.setText(recipient.getDisplayName(getContext()));
-      groupSenderProfileName.setVisibility(View.GONE);
     }
   }
 
-  private void setGroupAuthorColor(@NonNull MessageRecord messageRecord) {
-    if (groupSender != null && groupSenderProfileName != null) {
+  private void setGroupAuthorColor(@NonNull MessageRecord messageRecord, boolean hasWallpaper) {
+    if (groupSender != null) {
       int stickerAuthorColor = ContextCompat.getColor(context, R.color.signal_text_primary);
-      if (shouldDrawBodyBubbleOutline(messageRecord)) {
+
+      if (shouldDrawBodyBubbleOutline(messageRecord, false)) {
         groupSender.setTextColor(stickerAuthorColor);
-        groupSenderProfileName.setTextColor(stickerAuthorColor);
-      } else if (hasSticker(messageRecord) || isBorderless(messageRecord)) {
+      } else if (!hasWallpaper && hasNoBubble(messageRecord)) {
         groupSender.setTextColor(stickerAuthorColor);
-        groupSenderProfileName.setTextColor(stickerAuthorColor);
       } else {
         int color = TextSecurePreferences.getUseContactColor(context)
                 ? ContextCompat.getColor(context, R.color.conversation_item_received_text_primary_color)
@@ -1148,13 +1197,20 @@ public final class ConversationItem extends RelativeLayout implements BindableCo
   }
 
   @SuppressWarnings("ConstantConditions")
-  private void setAuthor(@NonNull MessageRecord current, @NonNull Optional<MessageRecord> previous, @NonNull Optional<MessageRecord> next, boolean isGroupThread) {
+  private void setAuthor(@NonNull MessageRecord current, @NonNull Optional<MessageRecord> previous, @NonNull Optional<MessageRecord> next, boolean isGroupThread, boolean hasWallpaper) {
     if (isGroupThread && !current.isOutgoing()) {
       contactPhotoHolder.setVisibility(TextSecurePreferences.getShowAvatar(getContext()) ? VISIBLE : GONE);
       if (!previous.isPresent() || previous.get().isUpdate() || !current.getRecipient().equals(previous.get().getRecipient()) ||
           !DateUtils.isSameDay(previous.get().getTimestamp(), current.getTimestamp()))
       {
         groupSenderHolder.setVisibility(VISIBLE);
+
+        if (hasWallpaper && hasNoBubble(current)) {
+          groupSenderHolder.setBackgroundResource(R.drawable.wallpaper_bubble_background_tintable_11);
+          groupSenderHolder.getBackground().setColorFilter(messageRecord.getRecipient().getColor().toConversationColor(context), PorterDuff.Mode.MULTIPLY);
+        } else {
+          groupSenderHolder.setBackground(null);
+        }
       } else {
         groupSenderHolder.setVisibility(GONE);
       }
