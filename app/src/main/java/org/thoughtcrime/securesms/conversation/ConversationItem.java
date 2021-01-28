@@ -1191,7 +1191,6 @@ public final class ConversationItem extends RelativeLayout implements BindableCo
                 ? ContextCompat.getColor(context, R.color.conversation_item_received_text_primary_color)
                 : messageRecord.getRecipient().getColor().toConversationColor(context);
         groupSender.setTextColor(color);
-        groupSenderProfileName.setTextColor(color);
       }
     }
   }
