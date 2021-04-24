@@ -32,6 +32,7 @@ import org.thoughtcrime.securesms.database.RecipientDatabase.MentionSetting;
 import org.thoughtcrime.securesms.database.RecipientDatabase.RegisteredState;
 import org.thoughtcrime.securesms.database.RecipientDatabase.UnidentifiedAccessMode;
 import org.thoughtcrime.securesms.database.RecipientDatabase.VibrateState;
+import org.thoughtcrime.securesms.database.model.databaseprotos.RecipientExtras;
 import org.thoughtcrime.securesms.dependencies.ApplicationDependencies;
 import org.thoughtcrime.securesms.groups.GroupId;
 import org.thoughtcrime.securesms.keyvalue.SignalStore;
@@ -41,7 +42,6 @@ import org.thoughtcrime.securesms.phonenumbers.PhoneNumberFormatter;
 import org.thoughtcrime.securesms.profiles.ProfileName;
 import org.thoughtcrime.securesms.util.FeatureFlags;
 import org.thoughtcrime.securesms.util.StringUtil;
-import org.thoughtcrime.securesms.util.TextSecurePreferences;
 import org.thoughtcrime.securesms.util.Util;
 import org.thoughtcrime.securesms.wallpaper.ChatWallpaper;
 import org.whispersystems.libsignal.util.guava.Optional;
@@ -90,11 +90,11 @@ public class Recipient {
   private final RegisteredState        registered;
   private final byte[]                 profileKey;
   private final ProfileKeyCredential   profileKeyCredential;
-  private final String                 name;
+  private final String                 groupName;
   private final Uri                    systemContactPhoto;
   private final String                 customLabel;
   private final Uri                    contactUri;
-  private final ProfileName            profileName;
+  private final ProfileName            signalProfileName;
   private final String                 profileAvatar;
   private final boolean                hasProfileImage;
   private final boolean                profileSharing;
@@ -110,7 +110,10 @@ public class Recipient {
   private final ChatWallpaper          wallpaper;
   private final String                 about;
   private final String                 aboutEmoji;
-
+  private final ProfileName            systemProfileName;
+  private final String                 systemContactName;
+  private final Optional<Extras>       extras;
+  private final boolean                hasGroupsInCommon;
 
   /**
    * Returns a {@link LiveRecipient}, which contains a {@link Recipient} that may or may not be
@@ -327,11 +330,11 @@ public class Recipient {
     this.registered                  = RegisteredState.UNKNOWN;
     this.profileKey                  = null;
     this.profileKeyCredential        = null;
-    this.name                        = null;
+    this.groupName                   = null;
     this.systemContactPhoto          = null;
     this.customLabel                 = null;
     this.contactUri                  = null;
-    this.profileName                 = ProfileName.EMPTY;
+    this.signalProfileName           = ProfileName.EMPTY;
     this.profileAvatar               = null;
     this.hasProfileImage             = false;
     this.profileSharing              = false;
@@ -346,6 +349,10 @@ public class Recipient {
     this.wallpaper                   = null;
     this.about                       = null;
     this.aboutEmoji                  = null;
+    this.systemProfileName           = ProfileName.EMPTY;
+    this.systemContactName           = null;
+    this.extras                      = Optional.absent();
+    this.hasGroupsInCommon           = false;
   }
 
   public Recipient(@NonNull RecipientId id, @NonNull RecipientDetails details, boolean resolved) {
@@ -372,11 +379,11 @@ public class Recipient {
     this.registered                  = details.registered;
     this.profileKey                  = details.profileKey;
     this.profileKeyCredential        = details.profileKeyCredential;
-    this.name                        = details.name;
+    this.groupName                   = details.groupName;
     this.systemContactPhoto          = details.systemContactPhoto;
     this.customLabel                 = details.customLabel;
     this.contactUri                  = details.contactUri;
-    this.profileName                 = details.profileName;
+    this.signalProfileName           = details.profileName;
     this.profileAvatar               = details.profileAvatar;
     this.hasProfileImage             = details.hasProfileImage;
     this.profileSharing              = details.profileSharing;
@@ -391,6 +398,10 @@ public class Recipient {
     this.wallpaper                   = details.wallpaper;
     this.about                       = details.about;
     this.aboutEmoji                  = details.aboutEmoji;
+    this.systemProfileName           = details.systemProfileName;
+    this.systemContactName           = details.systemContactName;
+    this.extras                      = details.extras;
+    this.hasGroupsInCommon           = details.hasGroupsInCommon;
   }
 
   public @NonNull RecipientId getId() {
@@ -405,8 +416,8 @@ public class Recipient {
     return contactUri;
   }
 
-  public @Nullable String getName(@NonNull Context context) {
-    if (this.name == null && groupId != null && groupId.isMms()) {
+  public @Nullable String getGroupName(@NonNull Context context) {
+    if (this.groupName == null && groupId != null && groupId.isMms()) {
       List<String> names = new LinkedList<>();
 
       for (Recipient recipient : participants) {
@@ -414,23 +425,32 @@ public class Recipient {
       }
 
       return Util.join(names, ", ");
-    } else if (name == null && groupId != null && groupId.isPush()) {
+    } else if (groupName == null && groupId != null && groupId.isPush()) {
       return context.getString(R.string.RecipientProvider_unnamed_group);
     } else {
-      return this.name;
+      return this.groupName;
     }
+  }
+
+  public boolean hasName() {
+    return groupName != null;
   }
 
   /**
    * False iff it {@link #getDisplayName} would fall back to e164, email or unknown.
    */
   public boolean hasAUserSetDisplayName(@NonNull Context context) {
-    return !TextUtils.isEmpty(getName(context)) ||
+    return !TextUtils.isEmpty(getGroupName(context))             ||
+           !TextUtils.isEmpty(systemContactName)                 ||
            !TextUtils.isEmpty(getProfileName().toString());
   }
 
   public @NonNull String getDisplayName(@NonNull Context context) {
-    String name = getName(context);
+    String name = getGroupName(context);
+
+    if (Util.isEmpty(name)) {
+      name = systemContactName;
+    }
 
     if (Util.isEmpty(name)) {
       name = getProfileName().toString();
@@ -452,7 +472,11 @@ public class Recipient {
   }
 
   public @NonNull String getDisplayNameOrUsername(@NonNull Context context) {
-    String name = getName(context);
+    String name = getGroupName(context);
+
+    if (Util.isEmpty(name)) {
+      name = systemContactName;
+    }
 
     if (Util.isEmpty(name)) {
       name = StringUtil.isolateBidi(getProfileName().toString());
@@ -478,11 +502,16 @@ public class Recipient {
   }
 
   public @NonNull String getMentionDisplayName(@NonNull Context context) {
-    String name = isSelf ? getProfileName().toString() : getName(context);
+    String name = isSelf ? getProfileName().toString() : getGroupName(context);
     name = StringUtil.isolateBidi(name);
 
     if (Util.isEmpty(name)) {
-      name = isSelf ? getName(context) : getProfileName().toString();
+      name = isSelf ? getGroupName(context) : systemContactName;
+      name = StringUtil.isolateBidi(name);
+    }
+
+    if (Util.isEmpty(name)) {
+      name = isSelf ? getGroupName(context) : getProfileName().toString();
       name = StringUtil.isolateBidi(name);
     }
 
@@ -502,7 +531,8 @@ public class Recipient {
   }
 
   public @NonNull String getShortDisplayName(@NonNull Context context) {
-    String name = Util.getFirstNonEmpty(getName(context),
+    String name = Util.getFirstNonEmpty(getGroupName(context),
+                                        getSystemProfileName().getGivenName(),
                                         getProfileName().getGivenName(),
                                         getDisplayName(context));
 
@@ -510,7 +540,8 @@ public class Recipient {
   }
 
   public @NonNull String getShortDisplayNameIncludingUsername(@NonNull Context context) {
-    String name = Util.getFirstNonEmpty(getName(context),
+    String name = Util.getFirstNonEmpty(getGroupName(context),
+                                        getSystemProfileName().getGivenName(),
                                         getProfileName().getGivenName(),
                                         getDisplayName(context),
                                         getUsername().orNull());
@@ -523,7 +554,7 @@ public class Recipient {
       return MaterialColor.GROUP;
     } else if (color != null) {
       return color;
-     } else if (name != null || profileSharing) {
+     } else if (groupName != null || profileSharing) {
       Log.w(TAG, "Had no color for " + id + "! Saving a new one.");
 
       Context       context = ApplicationDependencies.getApplication();
@@ -669,7 +700,11 @@ public class Recipient {
   }
 
   public @NonNull ProfileName getProfileName() {
-    return profileName;
+    return signalProfileName;
+  }
+
+  private @NonNull ProfileName getSystemProfileName() {
+    return systemProfileName;
   }
 
   public @Nullable String getProfileAvatar() {
@@ -741,12 +776,14 @@ public class Recipient {
   }
 
   public @NonNull FallbackContactPhoto getFallbackContactPhoto(@NonNull FallbackPhotoProvider fallbackPhotoProvider) {
-    if      (isSelf)                   return fallbackPhotoProvider.getPhotoForLocalNumber();
-    else if (isResolving())            return fallbackPhotoProvider.getPhotoForResolvingRecipient();
-    else if (isGroupInternal())        return fallbackPhotoProvider.getPhotoForGroup();
-    else if (isGroup())                return fallbackPhotoProvider.getPhotoForGroup();
-    else if (!TextUtils.isEmpty(name)) return fallbackPhotoProvider.getPhotoForRecipientWithName(name);
-    else                               return fallbackPhotoProvider.getPhotoForRecipientWithoutName();
+    if      (isSelf)                                return fallbackPhotoProvider.getPhotoForLocalNumber();
+    else if (isResolving())                         return fallbackPhotoProvider.getPhotoForResolvingRecipient();
+    else if (isGroupInternal())                     return fallbackPhotoProvider.getPhotoForGroup();
+    else if (isGroup())                             return fallbackPhotoProvider.getPhotoForGroup();
+    else if (!TextUtils.isEmpty(groupName))         return fallbackPhotoProvider.getPhotoForRecipientWithName(groupName);
+    else if (!TextUtils.isEmpty(systemContactName)) return fallbackPhotoProvider.getPhotoForRecipientWithName(systemContactName);
+    else if (!signalProfileName.isEmpty())          return fallbackPhotoProvider.getPhotoForRecipientWithName(signalProfileName.toString());
+    else                                            return fallbackPhotoProvider.getPhotoForRecipientWithoutName();
   }
 
   public @Nullable ContactPhoto getContactPhoto() {
@@ -898,6 +935,18 @@ public class Recipient {
     }
   }
 
+  public boolean shouldBlurAvatar() {
+    boolean showOverride = false;
+    if (extras.isPresent()) {
+      showOverride = extras.get().manuallyShownAvatar();
+    }
+    return !showOverride && !isSelf() && !isProfileSharing() && !isSystemContact() && !hasGroupsInCommon && isRegistered();
+  }
+
+  public boolean hasGroupsInCommon() {
+    return hasGroupsInCommon;
+  }
+
   /**
    * If this recipient is missing crucial data, this will return a populated copy. Otherwise it
    * returns itself.
@@ -972,6 +1021,39 @@ public class Recipient {
     }
   }
 
+  public static final class Extras {
+    private final RecipientExtras recipientExtras;
+
+    public static @Nullable Extras from(@Nullable RecipientExtras recipientExtras) {
+      if (recipientExtras != null) {
+        return new Extras(recipientExtras);
+      } else {
+        return null;
+      }
+    }
+
+    private Extras(@NonNull RecipientExtras extras) {
+      this.recipientExtras = extras;
+    }
+
+    public boolean manuallyShownAvatar() {
+      return recipientExtras.getManuallyShownAvatar();
+    }
+
+    @Override
+    public boolean equals(Object o) {
+      if (this == o) return true;
+      if (o == null || getClass() != o.getClass()) return false;
+      final Extras that = (Extras) o;
+      return manuallyShownAvatar() == that.manuallyShownAvatar();
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hash(manuallyShownAvatar());
+    }
+  }
+
   public boolean hasSameContent(@NonNull Recipient other) {
     return Objects.equals(id, other.id) &&
            resolving == other.resolving &&
@@ -1000,11 +1082,12 @@ public class Recipient {
            registered == other.registered &&
            Arrays.equals(profileKey, other.profileKey) &&
            Objects.equals(profileKeyCredential, other.profileKeyCredential) &&
-           Objects.equals(name, other.name) &&
+           Objects.equals(groupName, other.groupName) &&
            Objects.equals(systemContactPhoto, other.systemContactPhoto) &&
            Objects.equals(customLabel, other.customLabel) &&
            Objects.equals(contactUri, other.contactUri) &&
-           Objects.equals(profileName, other.profileName) &&
+           Objects.equals(signalProfileName, other.signalProfileName) &&
+           Objects.equals(systemProfileName, other.systemProfileName) &&
            Objects.equals(profileAvatar, other.profileAvatar) &&
            Objects.equals(notificationChannel, other.notificationChannel) &&
            unidentifiedAccessMode == other.unidentifiedAccessMode &&
@@ -1015,7 +1098,8 @@ public class Recipient {
            mentionSetting == other.mentionSetting &&
            Objects.equals(wallpaper, other.wallpaper) &&
            Objects.equals(about, other.about) &&
-           Objects.equals(aboutEmoji, other.aboutEmoji);
+           Objects.equals(aboutEmoji, other.aboutEmoji) &&
+           Objects.equals(extras, other.extras);
   }
 
   private static boolean allContentsAreTheSame(@NonNull List<Recipient> a, @NonNull List<Recipient> b) {

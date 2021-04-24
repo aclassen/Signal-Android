@@ -16,6 +16,7 @@ import androidx.core.content.ContextCompat;
 import androidx.lifecycle.LifecycleOwner;
 import androidx.lifecycle.LiveData;
 import androidx.lifecycle.Observer;
+import androidx.recyclerview.widget.RecyclerView;
 
 import com.google.android.material.button.MaterialButton;
 
@@ -23,11 +24,14 @@ import org.signal.core.util.logging.Log;
 import org.thoughtcrime.securesms.BindableConversationItem;
 import org.thoughtcrime.securesms.R;
 import org.thoughtcrime.securesms.VerifyIdentityActivity;
+import org.thoughtcrime.securesms.conversation.ui.error.EnableCallNotificationSettingsDialog;
 import org.thoughtcrime.securesms.database.IdentityDatabase.IdentityRecord;
 import org.thoughtcrime.securesms.database.model.GroupCallUpdateDetailsUtil;
+import org.thoughtcrime.securesms.database.model.InMemoryMessageRecord;
 import org.thoughtcrime.securesms.database.model.LiveUpdateMessage;
 import org.thoughtcrime.securesms.database.model.MessageRecord;
 import org.thoughtcrime.securesms.database.model.UpdateDescription;
+import org.thoughtcrime.securesms.giph.mp4.GiphyMp4Projection;
 import org.thoughtcrime.securesms.mms.GlideRequests;
 import org.thoughtcrime.securesms.recipients.LiveRecipient;
 import org.thoughtcrime.securesms.recipients.Recipient;
@@ -39,6 +43,7 @@ import org.thoughtcrime.securesms.util.Util;
 import org.thoughtcrime.securesms.util.ViewUtil;
 import org.thoughtcrime.securesms.util.concurrent.ListenableFuture;
 import org.thoughtcrime.securesms.util.livedata.LiveDataUtil;
+import org.thoughtcrime.securesms.video.exo.AttachmentMediaSourceFactory;
 import org.whispersystems.libsignal.util.guava.Optional;
 
 import java.util.Collection;
@@ -51,19 +56,19 @@ import java.util.concurrent.ExecutionException;
 public final class ConversationUpdateItem extends FrameLayout
                                           implements BindableConversationItem
 {
-  private static final String TAG = ConversationUpdateItem.class.getSimpleName();
+  private static final String TAG = Log.tag(ConversationUpdateItem.class);
 
   private Set<ConversationMessage> batchSelected;
 
-  private TextView                body;
-  private MaterialButton          actionButton;
-  private View                    background;
-  private ConversationMessage     conversationMessage;
-  private Recipient               conversationRecipient;
-  private Optional<MessageRecord> nextMessageRecord;
-  private MessageRecord           messageRecord;
-  private LiveData<Spannable>     displayBody;
-  private EventListener           eventListener;
+  private TextView                  body;
+  private MaterialButton            actionButton;
+  private View                      background;
+  private ConversationMessage       conversationMessage;
+  private Recipient                 conversationRecipient;
+  private Optional<MessageRecord>   nextMessageRecord;
+  private MessageRecord             messageRecord;
+  private LiveData<SpannableString> displayBody;
+  private EventListener             eventListener;
 
   private final UpdateObserver updateObserver = new UpdateObserver();
 
@@ -100,7 +105,10 @@ public final class ConversationUpdateItem extends FrameLayout
                    @NonNull Recipient conversationRecipient,
                    @Nullable String searchQuery,
                    boolean pulseMention,
-                   boolean hasWallpaper)
+                   boolean hasWallpaper,
+                   boolean isMessageRequestAccepted,
+                   @NonNull AttachmentMediaSourceFactory attachmentMediaSourceFactory,
+                   boolean allowedToPlayInline)
   {
     this.batchSelected = batchSelected;
 
@@ -150,9 +158,9 @@ public final class ConversationUpdateItem extends FrameLayout
       }
     }
 
-    UpdateDescription   updateDescription = Objects.requireNonNull(messageRecord.getUpdateDisplayBody(getContext()));
-    LiveData<Spannable> liveUpdateMessage = LiveUpdateMessage.fromMessageDescription(getContext(), updateDescription, textColor);
-    LiveData<Spannable> spannableMessage  = loading(liveUpdateMessage);
+    UpdateDescription         updateDescription = Objects.requireNonNull(messageRecord.getUpdateDisplayBody(getContext()));
+    LiveData<SpannableString> liveUpdateMessage = LiveUpdateMessage.fromMessageDescription(getContext(), updateDescription, textColor);
+    LiveData<SpannableString> spannableMessage  = loading(liveUpdateMessage);
 
     observeDisplayBody(lifecycleOwner, spannableMessage);
 
@@ -163,19 +171,45 @@ public final class ConversationUpdateItem extends FrameLayout
                       hasWallpaper);
   }
 
-  private static boolean shouldCollapse(@NonNull MessageRecord current, @NonNull Optional<MessageRecord> candidate) {
+  private static boolean shouldCollapse(@NonNull MessageRecord current, @NonNull Optional<MessageRecord> candidate)
+  {
     return candidate.isPresent()      &&
            candidate.get().isUpdate() &&
-           DateUtils.isSameDay(current.getTimestamp(), candidate.get().getTimestamp());
+           DateUtils.isSameDay(current.getTimestamp(), candidate.get().getTimestamp()) &&
+           isSameType(current, candidate.get());
   }
 
   /** After a short delay, if the main data hasn't shown yet, then a loading message is displayed. */
-  private @NonNull LiveData<Spannable> loading(@NonNull LiveData<Spannable> string) {
+  private @NonNull LiveData<SpannableString> loading(@NonNull LiveData<SpannableString> string) {
     return LiveDataUtil.until(string, LiveDataUtil.delay(250, new SpannableString(getContext().getString(R.string.ConversationUpdateItem_loading))));
   }
 
   @Override
   public void unbind() {
+  }
+
+  @Override
+  public void showProjectionArea() {
+  }
+
+  @Override
+  public void hideProjectionArea() {
+    throw new UnsupportedOperationException("Call makes no sense for a conversation update item");
+  }
+
+  @Override
+  public int getAdapterPosition() {
+    throw new UnsupportedOperationException("Don't delegate to this method.");
+  }
+
+  @Override
+  public @NonNull GiphyMp4Projection getProjection(@NonNull RecyclerView recyclerView) {
+    throw new UnsupportedOperationException("ConversationUpdateItems cannot be projected into.");
+  }
+
+  @Override
+  public boolean canPlayContent() {
+    return false;
   }
 
   static final class RecipientObserverManager {
@@ -206,7 +240,7 @@ public final class ConversationUpdateItem extends FrameLayout
     }
   }
 
-  private void observeDisplayBody(@NonNull LifecycleOwner lifecycleOwner, @Nullable LiveData<Spannable> displayBody) {
+  private void observeDisplayBody(@NonNull LifecycleOwner lifecycleOwner, @Nullable LiveData<SpannableString> displayBody) {
     if (this.displayBody != displayBody) {
       if (this.displayBody != null) {
         this.displayBody.removeObserver(updateObserver);
@@ -229,7 +263,10 @@ public final class ConversationUpdateItem extends FrameLayout
     }
   }
 
-  private void present(ConversationMessage conversationMessage, @NonNull Optional<MessageRecord> nextMessageRecord, @NonNull Recipient conversationRecipient) {
+  private void present(@NonNull ConversationMessage conversationMessage,
+                       @NonNull Optional<MessageRecord> nextMessageRecord,
+                       @NonNull Recipient conversationRecipient)
+  {
     if (batchSelected.contains(conversationMessage)) setSelected(true);
     else                                             setSelected(false);
 
@@ -294,6 +331,23 @@ public final class ConversationUpdateItem extends FrameLayout
       actionButton.setOnClickListener(v -> {
         if (batchSelected.isEmpty() && eventListener != null) {
           eventListener.onInviteFriendsToGroupClicked(conversationRecipient.requireGroupId().requireV2());
+        }
+      });
+    } else if ((conversationMessage.getMessageRecord().isMissedAudioCall() || conversationMessage.getMessageRecord().isMissedVideoCall()) && EnableCallNotificationSettingsDialog.shouldShow(getContext())) {
+      actionButton.setVisibility(VISIBLE);
+      actionButton.setText(R.string.ConversationUpdateItem_enable_call_notifications);
+      actionButton.setOnClickListener(v -> {
+        if (eventListener != null) {
+          eventListener.onEnableCallNotificationsClicked();
+        }
+      });
+    } else if (conversationMessage.getMessageRecord().isInMemoryMessageRecord() && ((InMemoryMessageRecord) conversationMessage.getMessageRecord()).showActionButton()) {
+      InMemoryMessageRecord inMemoryMessageRecord = (InMemoryMessageRecord) conversationMessage.getMessageRecord();
+      actionButton.setVisibility(VISIBLE);
+      actionButton.setText(inMemoryMessageRecord.getActionButtonText());
+      actionButton.setOnClickListener(v -> {
+        if (eventListener != null) {
+          eventListener.onInMemoryMessageClicked(inMemoryMessageRecord);
         }
       });
     } else {
@@ -365,6 +419,13 @@ public final class ConversationUpdateItem extends FrameLayout
         background.setBackground(null);
       }
     }
+  }
+
+  private static boolean isSameType(@NonNull MessageRecord current, @NonNull MessageRecord candidate) {
+    return (current.isGroupUpdate()           && candidate.isGroupUpdate())   ||
+           (current.isProfileChange()         && candidate.isProfileChange()) ||
+           (current.isGroupCall()             && candidate.isGroupCall())     ||
+           (current.isExpirationTimerUpdate() && candidate.isExpirationTimerUpdate());
   }
 
   @Override

@@ -8,6 +8,7 @@ import android.text.TextUtils;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+import androidx.arch.core.util.Function;
 
 import com.annimon.stream.Stream;
 import com.google.protobuf.ByteString;
@@ -31,6 +32,7 @@ import org.thoughtcrime.securesms.database.helpers.SQLCipherOpenHelper;
 import org.thoughtcrime.securesms.database.model.ThreadRecord;
 import org.thoughtcrime.securesms.database.model.databaseprotos.DeviceLastResetTime;
 import org.thoughtcrime.securesms.database.model.databaseprotos.ProfileKeyCredentialColumnData;
+import org.thoughtcrime.securesms.database.model.databaseprotos.RecipientExtras;
 import org.thoughtcrime.securesms.database.model.databaseprotos.Wallpaper;
 import org.thoughtcrime.securesms.dependencies.ApplicationDependencies;
 import org.thoughtcrime.securesms.groups.GroupId;
@@ -39,13 +41,12 @@ import org.thoughtcrime.securesms.groups.v2.processing.GroupsV2StateProcessor;
 import org.thoughtcrime.securesms.jobs.RefreshAttributesJob;
 import org.thoughtcrime.securesms.jobs.RequestGroupV2InfoJob;
 import org.thoughtcrime.securesms.jobs.RetrieveProfileJob;
-import org.thoughtcrime.securesms.mms.PartAuthority;
 import org.thoughtcrime.securesms.profiles.AvatarHelper;
 import org.thoughtcrime.securesms.profiles.ProfileName;
 import org.thoughtcrime.securesms.recipients.Recipient;
 import org.thoughtcrime.securesms.recipients.RecipientId;
+import org.thoughtcrime.securesms.storage.StorageRecordUpdate;
 import org.thoughtcrime.securesms.storage.StorageSyncHelper;
-import org.thoughtcrime.securesms.storage.StorageSyncHelper.RecordUpdate;
 import org.thoughtcrime.securesms.storage.StorageSyncModels;
 import org.thoughtcrime.securesms.util.Base64;
 import org.thoughtcrime.securesms.util.Bitmask;
@@ -62,6 +63,7 @@ import org.whispersystems.libsignal.IdentityKey;
 import org.whispersystems.libsignal.InvalidKeyException;
 import org.whispersystems.libsignal.util.Pair;
 import org.whispersystems.libsignal.util.guava.Optional;
+import org.whispersystems.libsignal.util.guava.Preconditions;
 import org.whispersystems.signalservice.api.profiles.SignalServiceProfile;
 import org.whispersystems.signalservice.api.push.SignalServiceAddress;
 import org.whispersystems.signalservice.api.storage.SignalAccountRecord;
@@ -91,7 +93,7 @@ import java.util.concurrent.TimeUnit;
 
 public class RecipientDatabase extends Database {
 
-  private static final String TAG = RecipientDatabase.class.getSimpleName();
+  private static final String TAG = Log.tag(RecipientDatabase.class);
 
           static final String TABLE_NAME                = "recipient";
   public  static final String ID                        = "_id";
@@ -113,7 +115,9 @@ public class RecipientDatabase extends Database {
   private static final String DEFAULT_SUBSCRIPTION_ID   = "default_subscription_id";
   private static final String MESSAGE_EXPIRATION_TIME   = "message_expiration_time";
   public  static final String REGISTERED                = "registered";
-  public  static final String SYSTEM_DISPLAY_NAME       = "system_display_name";
+  public  static final String SYSTEM_JOINED_NAME        = "system_display_name";
+  public  static final String SYSTEM_FAMILY_NAME        = "system_family_name";
+  public  static final String SYSTEM_GIVEN_NAME         = "system_given_name";
   private static final String SYSTEM_PHOTO_URI          = "system_photo_uri";
   public  static final String SYSTEM_PHONE_TYPE         = "system_phone_type";
   public  static final String SYSTEM_PHONE_LABEL        = "system_phone_label";
@@ -138,8 +142,10 @@ public class RecipientDatabase extends Database {
   private static final String LAST_SESSION_RESET        = "last_session_reset";
   private static final String WALLPAPER                 = "wallpaper";
   private static final String WALLPAPER_URI             = "wallpaper_file";
-  public  static final String ABOUT                     = "about";
-  public  static final String ABOUT_EMOJI               = "about_emoji";
+  public static final  String ABOUT                     = "about";
+  public static final  String ABOUT_EMOJI               = "about_emoji";
+  private static final String EXTRAS                    = "extras";
+  private static final String GROUPS_IN_COMMON          = "groups_in_common";
 
   public  static final String SEARCH_PROFILE_NAME      = "search_signal_profile";
   private static final String SORT_NAME                = "sort_name";
@@ -157,7 +163,7 @@ public class RecipientDatabase extends Database {
       ID, UUID, USERNAME, PHONE, EMAIL, GROUP_ID, GROUP_TYPE,
       BLOCKED, MESSAGE_RINGTONE, CALL_RINGTONE, MESSAGE_VIBRATE, CALL_VIBRATE, MUTE_UNTIL, COLOR, SEEN_INVITE_REMINDER, DEFAULT_SUBSCRIPTION_ID, MESSAGE_EXPIRATION_TIME, REGISTERED,
       PROFILE_KEY, PROFILE_KEY_CREDENTIAL,
-      SYSTEM_DISPLAY_NAME, SYSTEM_PHOTO_URI, SYSTEM_PHONE_LABEL, SYSTEM_PHONE_TYPE, SYSTEM_CONTACT_URI,
+      SYSTEM_JOINED_NAME, SYSTEM_GIVEN_NAME, SYSTEM_FAMILY_NAME, SYSTEM_PHOTO_URI, SYSTEM_PHONE_LABEL, SYSTEM_PHONE_TYPE, SYSTEM_CONTACT_URI,
       PROFILE_GIVEN_NAME, PROFILE_FAMILY_NAME, SIGNAL_PROFILE_AVATAR, PROFILE_SHARING, LAST_PROFILE_FETCH,
       NOTIFICATION_CHANNEL,
       UNIDENTIFIED_ACCESS_MODE,
@@ -166,19 +172,20 @@ public class RecipientDatabase extends Database {
       STORAGE_SERVICE_ID, DIRTY,
       MENTION_SETTING, WALLPAPER, WALLPAPER_URI,
       MENTION_SETTING,
-      ABOUT, ABOUT_EMOJI
+      ABOUT, ABOUT_EMOJI,
+      EXTRAS, GROUPS_IN_COMMON
   };
 
   private static final String[] ID_PROJECTION              = new String[]{ID};
-  private static final String[] SEARCH_PROJECTION          = new String[]{ID, SYSTEM_DISPLAY_NAME, PHONE, EMAIL, SYSTEM_PHONE_LABEL, SYSTEM_PHONE_TYPE, REGISTERED, ABOUT, ABOUT_EMOJI, "COALESCE(" + nullIfEmpty(PROFILE_JOINED_NAME) + ", " + nullIfEmpty(PROFILE_GIVEN_NAME) + ") AS " + SEARCH_PROFILE_NAME, "COALESCE(" + nullIfEmpty(SYSTEM_DISPLAY_NAME) + ", " + nullIfEmpty(PROFILE_JOINED_NAME) + ", " + nullIfEmpty(PROFILE_GIVEN_NAME) + ", " + nullIfEmpty(USERNAME) + ") AS " + SORT_NAME};
-  public  static final String[] SEARCH_PROJECTION_NAMES    = new String[]{ID, SYSTEM_DISPLAY_NAME, PHONE, EMAIL, SYSTEM_PHONE_LABEL, SYSTEM_PHONE_TYPE, REGISTERED, ABOUT, ABOUT_EMOJI, SEARCH_PROFILE_NAME, SORT_NAME};
+  private static final String[] SEARCH_PROJECTION          = new String[]{ID, SYSTEM_JOINED_NAME, PHONE, EMAIL, SYSTEM_PHONE_LABEL, SYSTEM_PHONE_TYPE, REGISTERED, ABOUT, ABOUT_EMOJI, EXTRAS, GROUPS_IN_COMMON, "COALESCE(" + nullIfEmpty(PROFILE_JOINED_NAME) + ", " + nullIfEmpty(PROFILE_GIVEN_NAME) + ") AS " + SEARCH_PROFILE_NAME, "COALESCE(" + nullIfEmpty(SYSTEM_JOINED_NAME) + ", " + nullIfEmpty(SYSTEM_GIVEN_NAME) + ", " + nullIfEmpty(PROFILE_JOINED_NAME) + ", " + nullIfEmpty(PROFILE_GIVEN_NAME) + ", " + nullIfEmpty(USERNAME) + ") AS " + SORT_NAME};
+  public  static final String[] SEARCH_PROJECTION_NAMES    = new String[]{ID, SYSTEM_JOINED_NAME, PHONE, EMAIL, SYSTEM_PHONE_LABEL, SYSTEM_PHONE_TYPE, REGISTERED, ABOUT, ABOUT_EMOJI, EXTRAS, GROUPS_IN_COMMON, SEARCH_PROFILE_NAME, SORT_NAME};
   private static final String[] TYPED_RECIPIENT_PROJECTION = Stream.of(RECIPIENT_PROJECTION)
                                                                    .map(columnName -> TABLE_NAME + "." + columnName)
                                                                    .toList().toArray(new String[0]);
 
   static final String[] TYPED_RECIPIENT_PROJECTION_NO_ID = Arrays.copyOfRange(TYPED_RECIPIENT_PROJECTION, 1, TYPED_RECIPIENT_PROJECTION.length);
 
-  private static final String[] MENTION_SEARCH_PROJECTION  = new String[]{ID, removeWhitespace("COALESCE(" + nullIfEmpty(SYSTEM_DISPLAY_NAME) + ", " + nullIfEmpty(PROFILE_JOINED_NAME) + ", " + nullIfEmpty(PROFILE_GIVEN_NAME) + ", " + nullIfEmpty(USERNAME) + ", " + nullIfEmpty(PHONE) + ")") + " AS " + SORT_NAME};
+  private static final String[] MENTION_SEARCH_PROJECTION  = new String[]{ID, removeWhitespace("COALESCE(" + nullIfEmpty(SYSTEM_JOINED_NAME) + ", " + nullIfEmpty(SYSTEM_GIVEN_NAME) + ", " + nullIfEmpty(PROFILE_JOINED_NAME) + ", " + nullIfEmpty(PROFILE_GIVEN_NAME) + ", " + nullIfEmpty(USERNAME) + ", " + nullIfEmpty(PHONE) + ")") + " AS " + SORT_NAME};
 
   public static final String[] CREATE_INDEXS = new String[] {
       "CREATE INDEX IF NOT EXISTS recipient_dirty_index ON " + TABLE_NAME + " (" + DIRTY + ");",
@@ -339,7 +346,9 @@ public class RecipientDatabase extends Database {
                                             DEFAULT_SUBSCRIPTION_ID   + " INTEGER DEFAULT -1, " +
                                             MESSAGE_EXPIRATION_TIME   + " INTEGER DEFAULT 0, " +
                                             REGISTERED                + " INTEGER DEFAULT " + RegisteredState.UNKNOWN.getId() + ", " +
-                                            SYSTEM_DISPLAY_NAME       + " TEXT DEFAULT NULL, " +
+                                            SYSTEM_GIVEN_NAME         + " TEXT DEFAULT NULL, " +
+                                            SYSTEM_FAMILY_NAME        + " TEXT DEFAULT NULL, " +
+                                            SYSTEM_JOINED_NAME        + " TEXT DEFAULT NULL, " +
                                             SYSTEM_PHOTO_URI          + " TEXT DEFAULT NULL, " +
                                             SYSTEM_PHONE_LABEL        + " TEXT DEFAULT NULL, " +
                                             SYSTEM_PHONE_TYPE         + " INTEGER DEFAULT -1, " +
@@ -365,7 +374,9 @@ public class RecipientDatabase extends Database {
                                             WALLPAPER                 + " BLOB DEFAULT NULL, " +
                                             WALLPAPER_URI             + " TEXT DEFAULT NULL, " +
                                             ABOUT                     + " TEXT DEFAULT NULL, " +
-                                            ABOUT_EMOJI               + " TEXT DEFAULT NULL);";
+                                            ABOUT_EMOJI               + " TEXT DEFAULT NULL, " +
+      EXTRAS + " BLOB DEFAULT NULL, " +
+                                            GROUPS_IN_COMMON          + " INTEGER DEFAULT 0);";
 
   private static final String INSIGHTS_INVITEE_LIST = "SELECT " + TABLE_NAME + "." + ID +
       " FROM " + TABLE_NAME +
@@ -698,7 +709,7 @@ public class RecipientDatabase extends Database {
       } else {
         Optional<RecipientId> remapped = RemappedRecords.getInstance().getRecipient(context, id);
         if (remapped.isPresent()) {
-          Log.w(TAG, "Missing recipient, but found it in the remapped records.");
+          Log.w(TAG, "Missing recipient for " + id + ", but found it in the remapped records as " + remapped.get());
           return getRecipientSettings(remapped.get());
         } else {
           throw new MissingRecipientException(id);
@@ -809,17 +820,176 @@ public class RecipientDatabase extends Database {
     }
   }
 
-  public void applyStorageSyncUpdates(@NonNull Collection<SignalContactRecord>               contactInserts,
-                                      @NonNull Collection<RecordUpdate<SignalContactRecord>> contactUpdates,
-                                      @NonNull Collection<SignalGroupV1Record>               groupV1Inserts,
-                                      @NonNull Collection<RecordUpdate<SignalGroupV1Record>> groupV1Updates,
-                                      @NonNull Collection<SignalGroupV2Record>               groupV2Inserts,
-                                      @NonNull Collection<RecordUpdate<SignalGroupV2Record>> groupV2Updates)
+  public void applyStorageSyncContactInsert(@NonNull SignalContactRecord insert) {
+    SQLiteDatabase   db               = databaseHelper.getWritableDatabase();
+    ThreadDatabase   threadDatabase   = DatabaseFactory.getThreadDatabase(context);
+
+    ContentValues values      = getValuesForStorageContact(insert, true);
+    long          id          = db.insertWithOnConflict(TABLE_NAME, null, values, SQLiteDatabase.CONFLICT_IGNORE);
+    RecipientId   recipientId = null;
+
+    if (id < 0) {
+      Log.w(TAG,  "[applyStorageSyncContactInsert] Failed to insert. Possibly merging.");
+      recipientId = getAndPossiblyMerge(insert.getAddress().getUuid().get(), insert.getAddress().getNumber().get(), true);
+      db.update(TABLE_NAME, values, ID_WHERE, SqlUtil.buildArgs(recipientId));
+    } else {
+      recipientId = RecipientId.from(id);
+    }
+
+    if (insert.getIdentityKey().isPresent()) {
+      try {
+        IdentityKey identityKey = new IdentityKey(insert.getIdentityKey().get(), 0);
+
+        DatabaseFactory.getIdentityDatabase(context).updateIdentityAfterSync(recipientId, identityKey, StorageSyncModels.remoteToLocalIdentityStatus(insert.getIdentityState()));
+      } catch (InvalidKeyException e) {
+        Log.w(TAG, "Failed to process identity key during insert! Skipping.", e);
+      }
+    }
+
+    threadDatabase.applyStorageSyncUpdate(recipientId, insert);
+  }
+
+  public void applyStorageSyncContactUpdate(@NonNull StorageRecordUpdate<SignalContactRecord> update) {
+    SQLiteDatabase   db               = databaseHelper.getWritableDatabase();
+    IdentityDatabase identityDatabase = DatabaseFactory.getIdentityDatabase(context);
+    ContentValues    values           = getValuesForStorageContact(update.getNew(), false);
+
+    try {
+      int updateCount = db.update(TABLE_NAME, values, STORAGE_SERVICE_ID + " = ?", new String[]{Base64.encodeBytes(update.getOld().getId().getRaw())});
+      if (updateCount < 1) {
+        throw new AssertionError("Had an update, but it didn't match any rows!");
+      }
+    } catch (SQLiteConstraintException e) {
+      Log.w(TAG,  "[applyStorageSyncContactUpdate] Failed to update a user by storageId.");
+
+      RecipientId recipientId = getByColumn(STORAGE_SERVICE_ID, Base64.encodeBytes(update.getOld().getId().getRaw())).get();
+      Log.w(TAG,  "[applyStorageSyncContactUpdate] Found user " + recipientId + ". Possibly merging.");
+
+      recipientId = getAndPossiblyMerge(update.getNew().getAddress().getUuid().orNull(), update.getNew().getAddress().getNumber().orNull(), true);
+      Log.w(TAG,  "[applyStorageSyncContactUpdate] Merged into " + recipientId);
+
+      db.update(TABLE_NAME, values, ID_WHERE, SqlUtil.buildArgs(recipientId));
+    }
+
+    RecipientId recipientId = getByStorageKeyOrThrow(update.getNew().getId().getRaw());
+
+    if (StorageSyncHelper.profileKeyChanged(update)) {
+      ContentValues clearValues = new ContentValues(1);
+      clearValues.putNull(PROFILE_KEY_CREDENTIAL);
+      db.update(TABLE_NAME, clearValues, ID_WHERE, SqlUtil.buildArgs(recipientId));
+    }
+
+    try {
+      Optional<IdentityRecord> oldIdentityRecord = identityDatabase.getIdentity(recipientId);
+
+      if (update.getNew().getIdentityKey().isPresent()) {
+        IdentityKey identityKey = new IdentityKey(update.getNew().getIdentityKey().get(), 0);
+        DatabaseFactory.getIdentityDatabase(context).updateIdentityAfterSync(recipientId, identityKey, StorageSyncModels.remoteToLocalIdentityStatus(update.getNew().getIdentityState()));
+      }
+
+      Optional<IdentityRecord> newIdentityRecord = identityDatabase.getIdentity(recipientId);
+
+      if ((newIdentityRecord.isPresent() && newIdentityRecord.get().getVerifiedStatus() == VerifiedStatus.VERIFIED) &&
+          (!oldIdentityRecord.isPresent() || oldIdentityRecord.get().getVerifiedStatus() != VerifiedStatus.VERIFIED))
+      {
+        IdentityUtil.markIdentityVerified(context, Recipient.resolved(recipientId), true, true);
+      } else if ((newIdentityRecord.isPresent() && newIdentityRecord.get().getVerifiedStatus() != VerifiedStatus.VERIFIED) &&
+          (oldIdentityRecord.isPresent() && oldIdentityRecord.get().getVerifiedStatus() == VerifiedStatus.VERIFIED))
+      {
+        IdentityUtil.markIdentityVerified(context, Recipient.resolved(recipientId), false, true);
+      }
+    } catch (InvalidKeyException e) {
+      Log.w(TAG, "Failed to process identity key during update! Skipping.", e);
+    }
+
+    DatabaseFactory.getThreadDatabase(context).applyStorageSyncUpdate(recipientId, update.getNew());
+
+    Recipient.live(recipientId).refresh();
+  }
+
+  public void applyStorageSyncGroupV1Insert(@NonNull SignalGroupV1Record insert) {
+    SQLiteDatabase db = databaseHelper.getWritableDatabase();
+
+    long        id          = db.insertOrThrow(TABLE_NAME, null, getValuesForStorageGroupV1(insert));
+    RecipientId recipientId = RecipientId.from(id);
+
+    DatabaseFactory.getThreadDatabase(context).applyStorageSyncUpdate(recipientId, insert);
+
+    Recipient.live(recipientId).refresh();
+  }
+
+  public void applyStorageSyncGroupV1Update(@NonNull StorageRecordUpdate<SignalGroupV1Record> update) {
+    SQLiteDatabase db = databaseHelper.getWritableDatabase();
+
+    ContentValues values      = getValuesForStorageGroupV1(update.getNew());
+    int           updateCount = db.update(TABLE_NAME, values, STORAGE_SERVICE_ID + " = ?", new String[]{Base64.encodeBytes(update.getOld().getId().getRaw())});
+
+    if (updateCount < 1) {
+      throw new AssertionError("Had an update, but it didn't match any rows!");
+    }
+
+    Recipient recipient = Recipient.externalGroupExact(context, GroupId.v1orThrow(update.getOld().getGroupId()));
+
+    DatabaseFactory.getThreadDatabase(context).applyStorageSyncUpdate(recipient.getId(), update.getNew());
+
+    recipient.live().refresh();
+  }
+
+  public void applyStorageSyncGroupV2Insert(@NonNull SignalGroupV2Record insert) {
+    SQLiteDatabase db = databaseHelper.getWritableDatabase();
+
+    GroupMasterKey masterKey = insert.getMasterKeyOrThrow();
+    GroupId.V2     groupId   = GroupId.v2(masterKey);
+    ContentValues  values    = getValuesForStorageGroupV2(insert);
+    long           id        = db.insertOrThrow(TABLE_NAME, null, values);
+    Recipient      recipient = Recipient.externalGroupExact(context, groupId);
+
+    Log.i(TAG, "Creating restore placeholder for " + groupId);
+    DatabaseFactory.getGroupDatabase(context)
+                   .create(masterKey,
+                           DecryptedGroup.newBuilder()
+                                         .setRevision(GroupsV2StateProcessor.RESTORE_PLACEHOLDER_REVISION)
+                                         .build());
+
+    Log.i(TAG, "Scheduling request for latest group info for " + groupId);
+
+    ApplicationDependencies.getJobManager().add(new RequestGroupV2InfoJob(groupId));
+
+    DatabaseFactory.getThreadDatabase(context).applyStorageSyncUpdate(recipient.getId(), insert);
+
+    recipient.live().refresh();
+  }
+
+  public void applyStorageSyncGroupV2Update(@NonNull StorageRecordUpdate<SignalGroupV2Record> update) {
+    SQLiteDatabase db = databaseHelper.getWritableDatabase();
+
+    ContentValues values      = getValuesForStorageGroupV2(update.getNew());
+    int           updateCount = db.update(TABLE_NAME, values, STORAGE_SERVICE_ID + " = ?", new String[]{Base64.encodeBytes(update.getOld().getId().getRaw())});
+
+    if (updateCount < 1) {
+      throw new AssertionError("Had an update, but it didn't match any rows!");
+    }
+
+    GroupMasterKey masterKey = update.getOld().getMasterKeyOrThrow();
+    Recipient      recipient = Recipient.externalGroupExact(context, GroupId.v2(masterKey));
+
+    DatabaseFactory.getThreadDatabase(context).applyStorageSyncUpdate(recipient.getId(), update.getNew());
+
+    recipient.live().refresh();
+  }
+
+  public boolean applyStorageSyncUpdates(@NonNull Collection<SignalContactRecord>                      contactInserts,
+                                         @NonNull Collection<StorageRecordUpdate<SignalContactRecord>> contactUpdates,
+                                         @NonNull Collection<SignalGroupV1Record>                      groupV1Inserts,
+                                         @NonNull Collection<StorageRecordUpdate<SignalGroupV1Record>> groupV1Updates,
+                                         @NonNull Collection<SignalGroupV2Record>                      groupV2Inserts,
+                                         @NonNull Collection<StorageRecordUpdate<SignalGroupV2Record>> groupV2Updates)
   {
     SQLiteDatabase   db               = databaseHelper.getWritableDatabase();
     IdentityDatabase identityDatabase = DatabaseFactory.getIdentityDatabase(context);
     ThreadDatabase   threadDatabase   = DatabaseFactory.getThreadDatabase(context);
     Set<RecipientId> needsRefresh     = new HashSet<>();
+    boolean          forcePush        = false;
 
     db.beginTransaction();
 
@@ -885,7 +1055,7 @@ public class RecipientDatabase extends Database {
         needsRefresh.add(recipientId);
       }
 
-      for (RecordUpdate<SignalContactRecord> update : contactUpdates) {
+      for (StorageRecordUpdate<SignalContactRecord> update : contactUpdates) {
         ContentValues values = getValuesForStorageContact(update.getNew(), false);
 
         try {
@@ -908,7 +1078,9 @@ public class RecipientDatabase extends Database {
         RecipientId recipientId = getByStorageKeyOrThrow(update.getNew().getId().getRaw());
 
         if (StorageSyncHelper.profileKeyChanged(update)) {
-          clearProfileKeyCredential(recipientId);
+          ContentValues clearValues = new ContentValues(1);
+          clearValues.putNull(PROFILE_KEY_CREDENTIAL);
+          update(recipientId, clearValues);
         }
 
         try {
@@ -926,7 +1098,7 @@ public class RecipientDatabase extends Database {
           {
             IdentityUtil.markIdentityVerified(context, Recipient.resolved(recipientId), true, true);
           } else if ((newIdentityRecord.isPresent() && newIdentityRecord.get().getVerifiedStatus() != VerifiedStatus.VERIFIED) &&
-                     (oldIdentityRecord.isPresent() && oldIdentityRecord.get().getVerifiedStatus() == VerifiedStatus.VERIFIED))
+              (oldIdentityRecord.isPresent() && oldIdentityRecord.get().getVerifiedStatus() == VerifiedStatus.VERIFIED))
           {
             IdentityUtil.markIdentityVerified(context, Recipient.resolved(recipientId), false, true);
           }
@@ -939,15 +1111,20 @@ public class RecipientDatabase extends Database {
       }
 
       for (SignalGroupV1Record insert : groupV1Inserts) {
-        db.insertOrThrow(TABLE_NAME, null, getValuesForStorageGroupV1(insert));
+        long id = db.insertWithOnConflict(TABLE_NAME, null, getValuesForStorageGroupV1(insert), SQLiteDatabase.CONFLICT_IGNORE);
 
-        Recipient recipient = Recipient.externalGroupExact(context, GroupId.v1orThrow(insert.getGroupId()));
+        if (id < 0) {
+          Log.w(TAG, "Duplicate GV1 entry detected! Ignoring, suggesting force-push.");
+          forcePush = true;
+        } else {
+          Recipient recipient = Recipient.externalGroupExact(context, GroupId.v1orThrow(insert.getGroupId()));
 
-        threadDatabase.applyStorageSyncUpdate(recipient.getId(), insert);
-        needsRefresh.add(recipient.getId());
+          threadDatabase.applyStorageSyncUpdate(recipient.getId(), insert);
+          needsRefresh.add(recipient.getId());
+        }
       }
 
-      for (RecordUpdate<SignalGroupV1Record> update : groupV1Updates) {
+      for (StorageRecordUpdate<SignalGroupV1Record> update : groupV1Updates) {
         ContentValues values      = getValuesForStorageGroupV1(update.getNew());
         int           updateCount = db.update(TABLE_NAME, values, STORAGE_SERVICE_ID + " = ?", new String[]{Base64.encodeBytes(update.getOld().getId().getRaw())});
 
@@ -960,7 +1137,7 @@ public class RecipientDatabase extends Database {
         threadDatabase.applyStorageSyncUpdate(recipient.getId(), update.getNew());
         needsRefresh.add(recipient.getId());
       }
-      
+
       for (SignalGroupV2Record insert : groupV2Inserts) {
         GroupMasterKey masterKey = insert.getMasterKeyOrThrow();
         GroupId.V2     groupId   = GroupId.v2(masterKey);
@@ -977,9 +1154,9 @@ public class RecipientDatabase extends Database {
         Log.i(TAG, "Creating restore placeholder for " + groupId);
         DatabaseFactory.getGroupDatabase(context)
                        .create(masterKey,
-                               DecryptedGroup.newBuilder()
-                                             .setRevision(GroupsV2StateProcessor.RESTORE_PLACEHOLDER_REVISION)
-                                             .build());
+                           DecryptedGroup.newBuilder()
+                                         .setRevision(GroupsV2StateProcessor.RESTORE_PLACEHOLDER_REVISION)
+                                         .build());
 
         Log.i(TAG, "Scheduling request for latest group info for " + groupId);
 
@@ -989,7 +1166,7 @@ public class RecipientDatabase extends Database {
         needsRefresh.add(recipient.getId());
       }
 
-      for (RecordUpdate<SignalGroupV2Record> update : groupV2Updates) {
+      for (StorageRecordUpdate<SignalGroupV2Record> update : groupV2Updates) {
         ContentValues values      = getValuesForStorageGroupV2(update.getNew());
         int           updateCount = db.update(TABLE_NAME, values, STORAGE_SERVICE_ID + " = ?", new String[]{Base64.encodeBytes(update.getOld().getId().getRaw())});
 
@@ -1012,6 +1189,8 @@ public class RecipientDatabase extends Database {
     for (RecipientId id : needsRefresh) {
       Recipient.live(id).refresh();
     }
+
+    return forcePush;
   }
 
   public void applyStorageSyncUpdates(@NonNull StorageId storageId, SignalAccountRecord update) {
@@ -1109,6 +1288,7 @@ public class RecipientDatabase extends Database {
     values.put(USERNAME, TextUtils.isEmpty(username) ? null : username);
     values.put(PROFILE_SHARING, contact.isProfileSharingEnabled() ? "1" : "0");
     values.put(BLOCKED, contact.isBlocked() ? "1" : "0");
+    values.put(MUTE_UNTIL, contact.getMuteUntil());
     values.put(STORAGE_SERVICE_ID, Base64.encodeBytes(contact.getId().getRaw()));
     values.put(DIRTY, DirtyState.CLEAN.getId());
 
@@ -1131,6 +1311,7 @@ public class RecipientDatabase extends Database {
     values.put(GROUP_TYPE, GroupType.SIGNAL_V1.getId());
     values.put(PROFILE_SHARING, groupV1.isProfileSharingEnabled() ? "1" : "0");
     values.put(BLOCKED, groupV1.isBlocked() ? "1" : "0");
+    values.put(MUTE_UNTIL, groupV1.getMuteUntil());
     values.put(STORAGE_SERVICE_ID, Base64.encodeBytes(groupV1.getId().getRaw()));
     values.put(DIRTY, DirtyState.CLEAN.getId());
 
@@ -1149,6 +1330,7 @@ public class RecipientDatabase extends Database {
     values.put(GROUP_TYPE, GroupType.SIGNAL_V2.getId());
     values.put(PROFILE_SHARING, groupV2.isProfileSharingEnabled() ? "1" : "0");
     values.put(BLOCKED, groupV2.isBlocked() ? "1" : "0");
+    values.put(MUTE_UNTIL, groupV2.getMuteUntil());
     values.put(STORAGE_SERVICE_ID, Base64.encodeBytes(groupV2.getId().getRaw()));
     values.put(DIRTY, DirtyState.CLEAN.getId());
 
@@ -1264,7 +1446,9 @@ public class RecipientDatabase extends Database {
     int     registeredState            = CursorUtil.requireInt(cursor, REGISTERED);
     String  profileKeyString           = CursorUtil.requireString(cursor, PROFILE_KEY);
     String  profileKeyCredentialString = CursorUtil.requireString(cursor, PROFILE_KEY_CREDENTIAL);
-    String  systemDisplayName          = CursorUtil.requireString(cursor, SYSTEM_DISPLAY_NAME);
+    String  systemGivenName            = CursorUtil.requireString(cursor, SYSTEM_GIVEN_NAME);
+    String  systemFamilyName           = CursorUtil.requireString(cursor, SYSTEM_FAMILY_NAME);
+    String  systemDisplayName          = CursorUtil.requireString(cursor, SYSTEM_JOINED_NAME);
     String  systemContactPhoto         = CursorUtil.requireString(cursor, SYSTEM_PHOTO_URI);
     String  systemPhoneLabel           = CursorUtil.requireString(cursor, SYSTEM_PHONE_LABEL);
     String  systemContactUri           = CursorUtil.requireString(cursor, SYSTEM_CONTACT_URI);
@@ -1282,6 +1466,7 @@ public class RecipientDatabase extends Database {
     byte[]  wallpaper                  = CursorUtil.requireBlob(cursor, WALLPAPER);
     String  about                      = CursorUtil.requireString(cursor, ABOUT);
     String  aboutEmoji                 = CursorUtil.requireString(cursor, ABOUT_EMOJI);
+    boolean hasGroupsInCommon          = CursorUtil.requireBoolean(cursor, GROUPS_IN_COMMON);
 
     MaterialColor        color;
     byte[]               profileKey           = null;
@@ -1350,6 +1535,7 @@ public class RecipientDatabase extends Database {
                                  RegisteredState.fromId(registeredState),
                                  profileKey,
                                  profileKeyCredential,
+                                 ProfileName.fromParts(systemGivenName, systemFamilyName),
                                  systemDisplayName,
                                  systemContactPhoto,
                                  systemPhoneLabel,
@@ -1369,7 +1555,9 @@ public class RecipientDatabase extends Database {
                                  chatWallpaper,
                                  about,
                                  aboutEmoji,
-                                 getSyncExtras(cursor));
+                                 getSyncExtras(cursor),
+                                 getExtras(cursor),
+                                 hasGroupsInCommon);
   }
 
   private static @NonNull RecipientSettings.SyncExtras getSyncExtras(@NonNull Cursor cursor) {
@@ -1383,6 +1571,23 @@ public class RecipientDatabase extends Database {
 
 
     return new RecipientSettings.SyncExtras(storageProto, groupMasterKey, identityKey, identityStatus, archived, forcedUnread);
+  }
+
+  private static @Nullable Recipient.Extras getExtras(@NonNull Cursor cursor) {
+    return Recipient.Extras.from(getRecipientExtras(cursor));
+  }
+
+  private static @Nullable RecipientExtras getRecipientExtras(@NonNull Cursor cursor) {
+    final Optional<byte[]> blob = CursorUtil.getBlob(cursor, EXTRAS);
+
+    return blob.transform(b -> {
+      try {
+        return RecipientExtras.parseFrom(b);
+      } catch (InvalidProtocolBufferException e) {
+        Log.w(TAG, e);
+        throw new AssertionError(e);
+      }
+    }).orNull();
   }
 
   public BulkOperationsHandle beginBulkSystemContactUpdate() {
@@ -1484,7 +1689,9 @@ public class RecipientDatabase extends Database {
     values.put(MUTE_UNTIL, until);
     if (update(id, values)) {
       Recipient.live(id).refresh();
+      markDirty(id, DirtyState.UPDATE);
     }
+    StorageSyncHelper.scheduleSyncForDataChange();
   }
 
   public void setSeenFirstInviteReminder(@NonNull RecipientId id) {
@@ -1743,7 +1950,7 @@ public class RecipientDatabase extends Database {
 
   public @NonNull List<RecipientId> getSimilarRecipientIds(@NonNull Recipient recipient) {
     SQLiteDatabase db   = databaseHelper.getReadableDatabase();
-    String[] projection = SqlUtil.buildArgs(ID, "COALESCE(" + nullIfEmpty(SYSTEM_DISPLAY_NAME) + ", " + nullIfEmpty(PROFILE_JOINED_NAME) + ") AS checked_name");
+    String[] projection = SqlUtil.buildArgs(ID, "COALESCE(" + nullIfEmpty(SYSTEM_JOINED_NAME) + ", " + nullIfEmpty(PROFILE_JOINED_NAME) + ") AS checked_name");
     String   where      =  "checked_name = ?";
 
     String[] arguments = SqlUtil.buildArgs(recipient.getProfileName().toString());
@@ -1803,6 +2010,14 @@ public class RecipientDatabase extends Database {
 
     boolean profiledUpdated = update(id, contentValues);
     boolean colorUpdated    = enabled && setColorIfNotSetInternal(id, ContactColors.generateFor(Recipient.resolved(id).getDisplayName(context)));
+
+    if (profiledUpdated && enabled) {
+      Optional<GroupDatabase.GroupRecord> group = DatabaseFactory.getGroupDatabase(context).getGroup(id);
+
+      if (group.isPresent()) {
+        setHasGroupsInCommon(group.get().getMembers());
+      }
+    }
 
     if (profiledUpdated || colorUpdated) {
       markDirty(id, DirtyState.UPDATE);
@@ -2246,7 +2461,7 @@ public class RecipientDatabase extends Database {
     SQLiteDatabase    db      = databaseHelper.getReadableDatabase();
     List<RecipientId> results = new LinkedList<>();
 
-    try (Cursor cursor = db.query(TABLE_NAME, ID_PROJECTION, SYSTEM_DISPLAY_NAME + " IS NOT NULL AND " + SYSTEM_DISPLAY_NAME + " != \"\"", null, null, null, null)) {
+    try (Cursor cursor = db.query(TABLE_NAME, ID_PROJECTION, SYSTEM_JOINED_NAME + " IS NOT NULL AND " + SYSTEM_JOINED_NAME + " != \"\"", null, null, null, null)) {
       while (cursor != null && cursor.moveToNext()) {
         results.add(RecipientId.from(cursor.getLong(cursor.getColumnIndexOrThrow(ID))));
       }
@@ -2260,10 +2475,10 @@ public class RecipientDatabase extends Database {
     Map<RecipientId, MaterialColor> updates = new HashMap<>();
 
     db.beginTransaction();
-    try (Cursor cursor = db.query(TABLE_NAME, new String[] {ID, COLOR, SYSTEM_DISPLAY_NAME}, SYSTEM_DISPLAY_NAME + " IS NOT NULL AND " + SYSTEM_DISPLAY_NAME + " != \"\"", null, null, null, null)) {
+    try (Cursor cursor = db.query(TABLE_NAME, new String[] {ID, COLOR, SYSTEM_JOINED_NAME}, SYSTEM_JOINED_NAME + " IS NOT NULL AND " + SYSTEM_JOINED_NAME + " != \"\"", null, null, null, null)) {
       while (cursor != null && cursor.moveToNext()) {
         long          id       = cursor.getLong(cursor.getColumnIndexOrThrow(ID));
-        MaterialColor newColor = updater.update(cursor.getString(cursor.getColumnIndexOrThrow(SYSTEM_DISPLAY_NAME)),
+        MaterialColor newColor = updater.update(cursor.getString(cursor.getColumnIndexOrThrow(SYSTEM_JOINED_NAME)),
                                                 cursor.getString(cursor.getColumnIndexOrThrow(COLOR)));
 
         ContentValues contentValues = new ContentValues(1);
@@ -2284,7 +2499,7 @@ public class RecipientDatabase extends Database {
     String   selection = BLOCKED    + " = ? AND "                                                     +
                          REGISTERED + " = ? AND "                                                     +
                          GROUP_ID   + " IS NULL AND "                                                 +
-                         "(" + SYSTEM_DISPLAY_NAME + " NOT NULL OR " + PROFILE_SHARING + " = ?) AND " +
+                         "(" + SYSTEM_JOINED_NAME + " NOT NULL OR " + PROFILE_SHARING + " = ?) AND " +
                          "(" + SORT_NAME + " NOT NULL OR " + USERNAME + " NOT NULL)";
     String[] args;
 
@@ -2295,7 +2510,7 @@ public class RecipientDatabase extends Database {
       args       = new String[] { "0", String.valueOf(RegisteredState.REGISTERED.getId()), "1", Recipient.self().getId().serialize() };
     }
 
-    String   orderBy   = SORT_NAME + ", " + SYSTEM_DISPLAY_NAME + ", " + SEARCH_PROFILE_NAME + ", " + USERNAME + ", " + PHONE;
+    String   orderBy   = SORT_NAME + ", " + SYSTEM_JOINED_NAME + ", " + SEARCH_PROFILE_NAME + ", " + USERNAME + ", " + PHONE;
 
     return databaseHelper.getReadableDatabase().query(TABLE_NAME, SEARCH_PROJECTION, selection, args, null, null, orderBy);
   }
@@ -2306,7 +2521,7 @@ public class RecipientDatabase extends Database {
     String   selection = BLOCKED     + " = ? AND " +
                          REGISTERED  + " = ? AND " +
                          GROUP_ID    + " IS NULL AND " +
-                         "(" + SYSTEM_DISPLAY_NAME + " NOT NULL OR " + PROFILE_SHARING + " = ?) AND " +
+                         "(" + SYSTEM_JOINED_NAME + " NOT NULL OR " + PROFILE_SHARING + " = ?) AND " +
                          "(" +
                            PHONE     + " GLOB ? OR " +
                            SORT_NAME + " GLOB ? OR " +
@@ -2321,7 +2536,7 @@ public class RecipientDatabase extends Database {
       args       = new String[] { "0", String.valueOf(RegisteredState.REGISTERED.getId()), "1", query, query, query, String.valueOf(Recipient.self().getId().toLong()) };
     }
 
-    String   orderBy   = SORT_NAME + ", " + SYSTEM_DISPLAY_NAME + ", " + SEARCH_PROFILE_NAME + ", " + PHONE;
+    String   orderBy   = SORT_NAME + ", " + SYSTEM_JOINED_NAME + ", " + SEARCH_PROFILE_NAME + ", " + PHONE;
 
     return databaseHelper.getReadableDatabase().query(TABLE_NAME, SEARCH_PROJECTION, selection, args, null, null, orderBy);
   }
@@ -2330,10 +2545,10 @@ public class RecipientDatabase extends Database {
     String   selection = BLOCKED    + " = ? AND " +
                          REGISTERED + " != ? AND " +
                          GROUP_ID   + " IS NULL AND " +
-                         SYSTEM_DISPLAY_NAME + " NOT NULL AND " +
+                         SYSTEM_CONTACT_URI + " NOT NULL AND " +
                          "(" + PHONE + " NOT NULL OR " + EMAIL + " NOT NULL)";
     String[] args      = new String[] { "0", String.valueOf(RegisteredState.REGISTERED.getId()) };
-    String   orderBy   = SYSTEM_DISPLAY_NAME + ", " + PHONE;
+    String   orderBy   = SYSTEM_JOINED_NAME + ", " + PHONE;
 
     return databaseHelper.getReadableDatabase().query(TABLE_NAME, SEARCH_PROJECTION, selection, args, null, null, orderBy);
   }
@@ -2344,15 +2559,15 @@ public class RecipientDatabase extends Database {
     String   selection = BLOCKED    + " = ? AND " +
                          REGISTERED + " != ? AND " +
                          GROUP_ID   + " IS NULL AND " +
-                         SYSTEM_DISPLAY_NAME + " NOT NULL AND " +
+                         SYSTEM_CONTACT_URI + " NOT NULL AND " +
                          "(" + PHONE + " NOT NULL OR " + EMAIL + " NOT NULL) AND " +
                          "(" +
-                           PHONE               + " GLOB ? OR " +
-                           EMAIL               + " GLOB ? OR " +
-                           SYSTEM_DISPLAY_NAME + " GLOB ?" +
+                           PHONE              + " GLOB ? OR " +
+                           EMAIL              + " GLOB ? OR " +
+                           SYSTEM_JOINED_NAME + " GLOB ?" +
                          ")";
     String[] args      = new String[] { "0", String.valueOf(RegisteredState.REGISTERED.getId()), query, query, query };
-    String   orderBy   = SYSTEM_DISPLAY_NAME + ", " + PHONE;
+    String   orderBy   = SYSTEM_JOINED_NAME + ", " + PHONE;
 
     return databaseHelper.getReadableDatabase().query(TABLE_NAME, SEARCH_PROJECTION, selection, args, null, null, orderBy);
   }
@@ -2418,10 +2633,70 @@ public class RecipientDatabase extends Database {
       pattern.append("[");
       pattern.append(point.toLowerCase());
       pattern.append(point.toUpperCase());
+      pattern.append(getAccentuatedCharRegex(point.toLowerCase()));
       pattern.append("]");
     }
 
     return "*" + pattern.toString() + "*";
+  }
+
+  private static @NonNull String getAccentuatedCharRegex(@NonNull String query) {
+    switch (query) {
+      case "a" :
+        return "À-Åà-åĀ-ąǍǎǞ-ǡǺ-ǻȀ-ȃȦȧȺɐ-ɒḀḁẚẠ-ặ";
+      case "b" :
+        return "ßƀ-ƅɃɓḂ-ḇ";
+      case "c" :
+        return "çÇĆ-čƆ-ƈȻȼɔḈḉ";
+      case "d" :
+        return "ÐðĎ-đƉ-ƍȡɖɗḊ-ḓ";
+      case "e" :
+        return "È-Ëè-ëĒ-ěƎ-ƐǝȄ-ȇȨȩɆɇɘ-ɞḔ-ḝẸ-ệ";
+      case "f" :
+        return "ƑƒḞḟ";
+      case "g" :
+        return "Ĝ-ģƓǤ-ǧǴǵḠḡ";
+      case "h" :
+        return "Ĥ-ħƕǶȞȟḢ-ḫẖ";
+      case "i" :
+        return "Ì-Ïì-ïĨ-ıƖƗǏǐȈ-ȋɨɪḬ-ḯỈ-ị";
+      case "j" :
+        return "ĴĵǰȷɈɉɟ";
+      case "k" :
+        return "Ķ-ĸƘƙǨǩḰ-ḵ";
+      case "l" :
+        return "Ĺ-łƚȴȽɫ-ɭḶ-ḽ";
+      case "m" :
+        return "Ɯɯ-ɱḾ-ṃ";
+      case "n" :
+        return "ÑñŃ-ŋƝƞǸǹȠȵɲ-ɴṄ-ṋ";
+      case "o" :
+        return "Ò-ÖØò-öøŌ-őƟ-ơǑǒǪ-ǭǾǿȌ-ȏȪ-ȱṌ-ṓỌ-ợ";
+      case "p" :
+        return "ƤƥṔ-ṗ";
+      case "q" :
+        return "";
+      case "r" :
+        return "Ŕ-řƦȐ-ȓɌɍṘ-ṟ";
+      case "s" :
+        return "Ś-šƧƨȘșȿṠ-ṩ";
+      case "t" :
+        return "Ţ-ŧƫ-ƮȚțȾṪ-ṱẗ";
+      case "u" :
+        return "Ù-Üù-üŨ-ųƯ-ƱǓ-ǜȔ-ȗɄṲ-ṻỤ-ự";
+      case "v" :
+        return "ƲɅṼ-ṿ";
+      case "w" :
+        return "ŴŵẀ-ẉẘ";
+      case "x" :
+        return "Ẋ-ẍ";
+      case "y" :
+        return "ÝýÿŶ-ŸƔƳƴȲȳɎɏẎẏỲ-ỹỾỿẙ";
+      case "z" :
+        return "Ź-žƵƶɀẐ-ẕ";
+      default :
+        return "";
+    }
   }
 
   public @NonNull List<Recipient> getRecipientsForMultiDeviceSync() {
@@ -2429,7 +2704,7 @@ public class RecipientDatabase extends Database {
     String   selection = REGISTERED + " = ? AND " +
                          GROUP_ID   + " IS NULL AND " +
                          ID         + " != ? AND " +
-                         "(" + SYSTEM_DISPLAY_NAME + " NOT NULL OR " + ID + " IN (" + subquery + "))";
+                         "(" + SYSTEM_CONTACT_URI + " NOT NULL OR " + ID + " IN (" + subquery + "))";
     String[] args      = new String[] { String.valueOf(RegisteredState.REGISTERED.getId()), Recipient.self().getId().serialize() };
 
     List<Recipient> recipients = new ArrayList<>();
@@ -2534,12 +2809,16 @@ public class RecipientDatabase extends Database {
     ApplicationDependencies.getRecipientCache().clear();
   }
 
-  public void updateStorageKeys(@NonNull Map<RecipientId, byte[]> keys) {
+  public void updateStorageId(@NonNull RecipientId recipientId, byte[] id) {
+    updateStorageIds(Collections.singletonMap(recipientId, id));
+  }
+
+  public void updateStorageIds(@NonNull Map<RecipientId, byte[]> ids) {
     SQLiteDatabase db = databaseHelper.getWritableDatabase();
     db.beginTransaction();
 
     try {
-      for (Map.Entry<RecipientId, byte[]> entry : keys.entrySet()) {
+      for (Map.Entry<RecipientId, byte[]> entry : ids.entrySet()) {
         ContentValues values = new ContentValues();
         values.put(STORAGE_SERVICE_ID, Base64.encodeBytes(entry.getValue()));
         db.update(TABLE_NAME, values, ID_WHERE, new String[] { entry.getKey().serialize() });
@@ -2550,8 +2829,24 @@ public class RecipientDatabase extends Database {
       db.endTransaction();
     }
 
-    for (RecipientId id : keys.keySet()) {
+    for (RecipientId id : ids.keySet()) {
       Recipient.live(id).refresh();
+    }
+  }
+
+  public void clearDirtyStateForStorageIds(@NonNull Collection<StorageId> ids) {
+    SQLiteDatabase db = databaseHelper.getWritableDatabase();
+
+    Preconditions.checkArgument(db.inTransaction(), "Database should already be in a transaction.");
+
+    ContentValues values = new ContentValues();
+    values.put(DIRTY, DirtyState.CLEAN.getId());
+
+    String query = STORAGE_SERVICE_ID + " = ?";
+
+    for (StorageId id : ids) {
+      String[] args = SqlUtil.buildArgs(Base64.encodeBytes(id.getRaw()));
+      db.update(TABLE_NAME, values, query, args);
     }
   }
 
@@ -2577,6 +2872,93 @@ public class RecipientDatabase extends Database {
     } finally {
       db.endTransaction();
     }
+  }
+
+  public void markPreMessageRequestRecipientsAsProfileSharingEnabled(long messageRequestEnableTime) {
+    String[] whereArgs = SqlUtil.buildArgs(messageRequestEnableTime, messageRequestEnableTime);
+
+    String select = "SELECT r." + ID + " FROM " + TABLE_NAME + " AS r "
+                    + "INNER JOIN " + ThreadDatabase.TABLE_NAME + " AS t ON t." + ThreadDatabase.RECIPIENT_ID + " = r." + ID + " WHERE "
+                    + "r." + PROFILE_SHARING + " = 0 AND "
+                    + "("
+                    + "EXISTS(SELECT 1 FROM " + SmsDatabase.TABLE_NAME + " WHERE " + SmsDatabase.THREAD_ID + " = t." + ThreadDatabase.ID + " AND " + SmsDatabase.DATE_RECEIVED + " < ?) "
+                    + "OR "
+                    + "EXISTS(SELECT 1 FROM " + MmsDatabase.TABLE_NAME + " WHERE " + MmsDatabase.THREAD_ID + " = t." + ThreadDatabase.ID + " AND " + MmsDatabase.DATE_RECEIVED + " < ?) "
+                    + ")";
+
+    List<Long> idsToUpdate = new ArrayList<>();
+    try (Cursor cursor = databaseHelper.getReadableDatabase().rawQuery(select, whereArgs)) {
+      while (cursor.moveToNext()) {
+        idsToUpdate.add(CursorUtil.requireLong(cursor, ID));
+      }
+    }
+
+    if (Util.hasItems(idsToUpdate)) {
+      SqlUtil.Query query  = SqlUtil.buildCollectionQuery(ID, idsToUpdate);
+      ContentValues values = new ContentValues(1);
+      values.put(PROFILE_SHARING, 1);
+      databaseHelper.getWritableDatabase().update(TABLE_NAME, values, query.getWhere(), query.getWhereArgs());
+
+      for (long id : idsToUpdate) {
+        Recipient.live(RecipientId.from(id)).refresh();
+      }
+    }
+  }
+
+  public void setHasGroupsInCommon(@NonNull List<RecipientId> recipientIds) {
+    SqlUtil.Query  query = SqlUtil.buildCollectionQuery(ID, recipientIds);
+    SQLiteDatabase db    = databaseHelper.getWritableDatabase();
+    try (Cursor cursor = db.query(TABLE_NAME,
+                                  new String[]{ID},
+                                  query.getWhere() + " AND " + GROUPS_IN_COMMON + " = 0",
+                                  query.getWhereArgs(),
+                                  null,
+                                  null,
+                                  null))
+    {
+      List<Long> idsToUpdate = new ArrayList<>(cursor.getCount());
+      while (cursor.moveToNext()) {
+        idsToUpdate.add(CursorUtil.requireLong(cursor, ID));
+      }
+
+      if (Util.hasItems(idsToUpdate)) {
+        query = SqlUtil.buildCollectionQuery(ID, idsToUpdate);
+        ContentValues values = new ContentValues();
+        values.put(GROUPS_IN_COMMON, 1);
+        int count = db.update(TABLE_NAME, values, query.getWhere(), query.getWhereArgs());
+        if (count > 0) {
+          for (long id : idsToUpdate) {
+            Recipient.live(RecipientId.from(id)).refresh();
+          }
+        }
+      }
+    }
+  }
+
+  public void manuallyShowAvatar(@NonNull RecipientId recipientId) {
+    updateExtras(recipientId, b -> b.setManuallyShownAvatar(true));
+  }
+
+  private void updateExtras(@NonNull RecipientId recipientId, @NonNull Function<RecipientExtras.Builder, RecipientExtras.Builder> updater) {
+    SQLiteDatabase db = databaseHelper.getWritableDatabase();
+    db.beginTransaction();
+    try {
+      try (Cursor cursor = db.query(TABLE_NAME, new String[]{ID, EXTRAS}, ID_WHERE, SqlUtil.buildArgs(recipientId), null, null, null)) {
+        if (cursor.moveToNext()) {
+          RecipientExtras         state        = getRecipientExtras(cursor);
+          RecipientExtras.Builder builder      = state != null ? state.toBuilder() : RecipientExtras.newBuilder();
+          byte[]                  updatedState = updater.apply(builder).build().toByteArray();
+          ContentValues           values       = new ContentValues(1);
+          values.put(EXTRAS, updatedState);
+          db.update(TABLE_NAME, values, ID_WHERE, SqlUtil.buildArgs(CursorUtil.requireLong(cursor, ID)));
+        }
+      }
+      db.setTransactionSuccessful();
+    } finally {
+      db.endTransaction();
+    }
+
+    Recipient.live(recipientId).refresh();
   }
 
   void markDirty(@NonNull RecipientId recipientId, @NonNull DirtyState dirtyState) {
@@ -2729,7 +3111,9 @@ public class RecipientDatabase extends Database {
     uuidValues.put(DEFAULT_SUBSCRIPTION_ID, e164Settings.getDefaultSubscriptionId().or(-1));
     uuidValues.put(MESSAGE_EXPIRATION_TIME, uuidSettings.getExpireMessages() > 0 ? uuidSettings.getExpireMessages() : e164Settings.getExpireMessages());
     uuidValues.put(REGISTERED, RegisteredState.REGISTERED.getId());
-    uuidValues.put(SYSTEM_DISPLAY_NAME, e164Settings.getSystemDisplayName());
+    uuidValues.put(SYSTEM_GIVEN_NAME, e164Settings.getSystemProfileName().getGivenName());
+    uuidValues.put(SYSTEM_FAMILY_NAME, e164Settings.getSystemProfileName().getFamilyName());
+    uuidValues.put(SYSTEM_JOINED_NAME, e164Settings.getSystemProfileName().toString());
     uuidValues.put(SYSTEM_PHOTO_URI, e164Settings.getSystemContactPhotoUri());
     uuidValues.put(SYSTEM_PHONE_LABEL, e164Settings.getSystemPhoneLabel());
     uuidValues.put(SYSTEM_CONTACT_URI, e164Settings.getSystemContactUri());
@@ -2840,14 +3224,19 @@ public class RecipientDatabase extends Database {
     }
 
     public void setSystemContactInfo(@NonNull RecipientId id,
-                                     @Nullable String displayName,
+                                     @NonNull ProfileName systemProfileName,
+                                     @Nullable String systemDisplayName,
                                      @Nullable String photoUri,
                                      @Nullable String systemPhoneLabel,
                                      int systemPhoneType,
                                      @Nullable String systemContactUri)
     {
       ContentValues dirtyQualifyingValues = new ContentValues();
-      dirtyQualifyingValues.put(SYSTEM_DISPLAY_NAME, displayName);
+      String        joinedName            = Util.firstNonNull(systemDisplayName, systemProfileName.toString());
+
+      dirtyQualifyingValues.put(SYSTEM_GIVEN_NAME, systemProfileName.getGivenName());
+      dirtyQualifyingValues.put(SYSTEM_FAMILY_NAME, systemProfileName.getFamilyName());
+      dirtyQualifyingValues.put(SYSTEM_JOINED_NAME, joinedName);
 
       if (update(id, dirtyQualifyingValues)) {
         markDirty(id, DirtyState.UPDATE);
@@ -2860,10 +3249,10 @@ public class RecipientDatabase extends Database {
       refreshQualifyingValues.put(SYSTEM_CONTACT_URI, systemContactUri);
 
       boolean updatedValues = update(id, refreshQualifyingValues);
-      boolean updatedColor  = displayName != null && setColorIfNotSetInternal(id, ContactColors.generateFor(displayName));
+      boolean updatedColor  = !TextUtils.isEmpty(joinedName) && setColorIfNotSetInternal(id, ContactColors.generateFor(joinedName));
 
       if (updatedValues || updatedColor) {
-        pendingContactInfoMap.put(id, new PendingContactInfo(displayName, photoUri, systemPhoneLabel, systemContactUri));
+        pendingContactInfoMap.put(id, new PendingContactInfo(systemProfileName, photoUri, systemPhoneLabel, systemContactUri));
       }
 
       ContentValues otherValues = new ContentValues();
@@ -2898,7 +3287,9 @@ public class RecipientDatabase extends Database {
       ContentValues values = new ContentValues(5);
 
       values.put(SYSTEM_INFO_PENDING, 0);
-      values.put(SYSTEM_DISPLAY_NAME, (String) null);
+      values.put(SYSTEM_GIVEN_NAME, (String) null);
+      values.put(SYSTEM_FAMILY_NAME, (String) null);
+      values.put(SYSTEM_JOINED_NAME, (String) null);
       values.put(SYSTEM_PHOTO_URI, (String) null);
       values.put(SYSTEM_PHONE_LABEL, (String) null);
       values.put(SYSTEM_CONTACT_URI, (String) null);
@@ -2939,6 +3330,7 @@ public class RecipientDatabase extends Database {
     private final RegisteredState                 registered;
     private final byte[]                          profileKey;
     private final ProfileKeyCredential            profileKeyCredential;
+    private final ProfileName                     systemProfileName;
     private final String                          systemDisplayName;
     private final String                          systemContactPhoto;
     private final String                          systemPhoneLabel;
@@ -2960,7 +3352,9 @@ public class RecipientDatabase extends Database {
     private final ChatWallpaper                   wallpaper;
     private final String                          about;
     private final String                          aboutEmoji;
-    private final SyncExtras                      syncExtras;
+    private final SyncExtras       syncExtras;
+    private final Recipient.Extras extras;
+    private final boolean          hasGroupsInCommon;
 
     RecipientSettings(@NonNull RecipientId id,
                       @Nullable UUID uuid,
@@ -2981,6 +3375,7 @@ public class RecipientDatabase extends Database {
                       @NonNull  RegisteredState registered,
                       @Nullable byte[] profileKey,
                       @Nullable ProfileKeyCredential profileKeyCredential,
+                      @NonNull ProfileName systemProfileName,
                       @Nullable String systemDisplayName,
                       @Nullable String systemContactPhoto,
                       @Nullable String systemPhoneLabel,
@@ -3000,7 +3395,9 @@ public class RecipientDatabase extends Database {
                       @Nullable ChatWallpaper wallpaper,
                       @Nullable String about,
                       @Nullable String aboutEmoji,
-                      @NonNull SyncExtras syncExtras)
+                      @NonNull SyncExtras syncExtras,
+                      @Nullable Recipient.Extras extras,
+                      boolean hasGroupsInCommon)
     {
       this.id                          = id;
       this.uuid                        = uuid;
@@ -3021,6 +3418,7 @@ public class RecipientDatabase extends Database {
       this.registered                  = registered;
       this.profileKey                  = profileKey;
       this.profileKeyCredential        = profileKeyCredential;
+      this.systemProfileName           = systemProfileName;
       this.systemDisplayName           = systemDisplayName;
       this.systemContactPhoto          = systemContactPhoto;
       this.systemPhoneLabel            = systemPhoneLabel;
@@ -3042,7 +3440,9 @@ public class RecipientDatabase extends Database {
       this.wallpaper                   = wallpaper;
       this.about                       = about;
       this.aboutEmoji                  = aboutEmoji;
-      this.syncExtras                  = syncExtras;
+      this.syncExtras        = syncExtras;
+      this.extras            = extras;
+      this.hasGroupsInCommon = hasGroupsInCommon;
     }
 
     public RecipientId getId() {
@@ -3125,7 +3525,11 @@ public class RecipientDatabase extends Database {
       return profileKeyCredential;
     }
 
-    public @Nullable String getSystemDisplayName() {
+    public @NonNull ProfileName getSystemProfileName() {
+      return systemProfileName;
+    }
+
+    public @NonNull String getSystemDisplayName() {
       return systemDisplayName;
     }
 
@@ -3203,6 +3607,14 @@ public class RecipientDatabase extends Database {
 
     public @NonNull SyncExtras getSyncExtras() {
       return syncExtras;
+    }
+
+    public @Nullable Recipient.Extras getExtras() {
+      return extras;
+    }
+
+    public boolean hasGroupsInCommon() {
+      return hasGroupsInCommon;
     }
 
     long getCapabilities() {
@@ -3313,13 +3725,13 @@ public class RecipientDatabase extends Database {
 
   private static class PendingContactInfo {
 
-    private final String displayName;
-    private final String photoUri;
-    private final String phoneLabel;
-    private final String contactUri;
+    private final ProfileName profileName;
+    private final String      photoUri;
+    private final String      phoneLabel;
+    private final String      contactUri;
 
-    private PendingContactInfo(String displayName, String photoUri, String phoneLabel, String contactUri) {
-      this.displayName = displayName;
+    private PendingContactInfo(@NonNull ProfileName systemProfileName, String photoUri, String phoneLabel, String contactUri) {
+      this.profileName = systemProfileName;
       this.photoUri    = photoUri;
       this.phoneLabel  = phoneLabel;
       this.contactUri  = contactUri;
